@@ -1,6 +1,6 @@
 #import "XLFrameSource.h"
+#import "XLPrivateSurface.h"
 
-#import <IOSurface/IOSurface.h>
 #import <UIKit/UIKit.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <os/lock.h>
@@ -128,4 +128,3 @@ static const NSInteger XLBufferCount = 3;
 }
 
 @end
-
