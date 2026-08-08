@@ -10,8 +10,20 @@ extern "C" {
 #endif
 
 IOSurfaceRef CVPixelBufferGetIOSurface(CVPixelBufferRef pixelBuffer);
+CVReturn CVPixelBufferCreateWithIOSurface(CFAllocatorRef allocator,
+                                          IOSurfaceRef surface,
+                                          CFDictionaryRef pixelBufferAttributes,
+                                          CVPixelBufferRef *pixelBufferOut);
+IOSurfaceRef IOSurfaceCreate(CFDictionaryRef properties);
+
+extern const CFStringRef kIOSurfaceAllocSize;
+extern const CFStringRef kIOSurfaceBytesPerElement;
+extern const CFStringRef kIOSurfaceBytesPerRow;
+extern const CFStringRef kIOSurfaceHeight;
+extern const CFStringRef kIOSurfaceIsGlobal;
+extern const CFStringRef kIOSurfacePixelFormat;
+extern const CFStringRef kIOSurfaceWidth;
 
 #ifdef __cplusplus
 }
 #endif
-

@@ -13,6 +13,50 @@ extern "C" void CARenderServerRenderDisplay(int display,
 
 static const NSInteger XLBufferCount = 3;
 
+static CVPixelBufferRef XLCreateSharedPixelBuffer(size_t width, size_t height) {
+    const size_t bytesPerElement = 4;
+    const size_t unalignedBytesPerRow = width * bytesPerElement;
+    const size_t bytesPerRow = (unalignedBytesPerRow + 63) & ~(size_t)63;
+    const size_t allocationSize = bytesPerRow * height;
+    NSDictionary *surfaceProperties = @{
+        (__bridge NSString *)kIOSurfaceWidth : @(width),
+        (__bridge NSString *)kIOSurfaceHeight : @(height),
+        (__bridge NSString *)kIOSurfaceBytesPerElement : @(bytesPerElement),
+        (__bridge NSString *)kIOSurfaceBytesPerRow : @(bytesPerRow),
+        (__bridge NSString *)kIOSurfaceAllocSize : @(allocationSize),
+        (__bridge NSString *)kIOSurfacePixelFormat : @(kCVPixelFormatType_32BGRA),
+        (__bridge NSString *)kIOSurfaceIsGlobal : @YES,
+    };
+
+    IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)surfaceProperties);
+    if (!surface) {
+        NSLog(@"[xlstreamd] direct IOSurface create failed: %zux%zu row=%zu",
+              width,
+              height,
+              bytesPerRow);
+        return nil;
+    }
+
+    NSDictionary *pixelBufferAttributes = @{
+        (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (__bridge NSString *)kCVPixelBufferCGImageCompatibilityKey : @YES,
+        (__bridge NSString *)kCVPixelBufferCGBitmapContextCompatibilityKey : @YES,
+    };
+    CVPixelBufferRef pixelBuffer = nil;
+    CVReturn result = CVPixelBufferCreateWithIOSurface(
+        kCFAllocatorDefault,
+        surface,
+        (__bridge CFDictionaryRef)pixelBufferAttributes,
+        &pixelBuffer);
+    CFRelease(surface);
+    if (result != kCVReturnSuccess || !pixelBuffer) {
+        NSLog(@"[xlstreamd] IOSurface pixel buffer wrap failed: %d", result);
+        if (pixelBuffer) CVPixelBufferRelease(pixelBuffer);
+        return nil;
+    }
+    return pixelBuffer;
+}
+
 @implementation XLFrameSource {
     CVPixelBufferRef _sourceBuffer;
     CVPixelBufferRef _outputBuffers[XLBufferCount];
@@ -39,32 +83,16 @@ static const NSInteger XLBufferCount = 3;
         sourceHeight = 1334;
     }
 
-    NSDictionary *surfaceAttributes = @{
-        (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{},
-        (__bridge NSString *)kCVPixelBufferCGImageCompatibilityKey : @YES,
-        (__bridge NSString *)kCVPixelBufferCGBitmapContextCompatibilityKey : @YES,
-    };
-
-    CVReturn result = CVPixelBufferCreate(kCFAllocatorDefault,
-                                           sourceWidth,
-                                           sourceHeight,
-                                           kCVPixelFormatType_32BGRA,
-                                           (__bridge CFDictionaryRef)surfaceAttributes,
-                                           &_sourceBuffer);
-    if (result != kCVReturnSuccess || !_sourceBuffer || !CVPixelBufferGetIOSurface(_sourceBuffer)) {
-        NSLog(@"[xlstreamd] source IOSurface create failed: %d", result);
+    _sourceBuffer = XLCreateSharedPixelBuffer(sourceWidth, sourceHeight);
+    if (!_sourceBuffer || !CVPixelBufferGetIOSurface(_sourceBuffer)) {
+        NSLog(@"[xlstreamd] source IOSurface setup failed");
         return nil;
     }
 
     for (NSInteger index = 0; index < XLBufferCount; index++) {
-        result = CVPixelBufferCreate(kCFAllocatorDefault,
-                                     width,
-                                     height,
-                                     kCVPixelFormatType_32BGRA,
-                                     (__bridge CFDictionaryRef)surfaceAttributes,
-                                     &_outputBuffers[index]);
-        if (result != kCVReturnSuccess || !_outputBuffers[index]) {
-            NSLog(@"[xlstreamd] output IOSurface %ld create failed: %d", (long)index, result);
+        _outputBuffers[index] = XLCreateSharedPixelBuffer(width, height);
+        if (!_outputBuffers[index]) {
+            NSLog(@"[xlstreamd] output IOSurface %ld setup failed", (long)index);
             return nil;
         }
     }
