@@ -2,6 +2,7 @@
 
 #import <dlfcn.h>
 #import <mach/mach_time.h>
+#include <unistd.h>
 
 typedef CFTypeRef IOHIDEventRef;
 typedef CFTypeRef IOHIDEventSystemClientRef;
@@ -211,6 +212,7 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
     _setSenderID(down, XLSyntheticSenderID);
     _setSenderID(up, XLSyntheticSenderID);
     _dispatchEvent(_client, down);
+    usleep(50000);
     _dispatchEvent(_client, up);
     CFRelease(down);
     CFRelease(up);
@@ -223,6 +225,12 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
 
 - (BOOL)sendPowerButton {
     return [self sendKeyboardPage:0x0C usage:0x30];
+}
+
+- (BOOL)sendAppSwitcher {
+    if (![self sendHomeButton]) return NO;
+    usleep(140000);
+    return [self sendHomeButton];
 }
 
 @end

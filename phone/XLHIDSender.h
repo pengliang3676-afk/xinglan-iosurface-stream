@@ -15,5 +15,6 @@
                pressure:(double)pressure;
 - (BOOL)sendHomeButton;
 - (BOOL)sendPowerButton;
+- (BOOL)sendAppSwitcher;
 
 @end

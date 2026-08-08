@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 
 #import "XLControlServer.h"
+#import "XLFileTransferServer.h"
 #import "XLStatusServer.h"
 #import "XLVideoServer.h"
 
@@ -12,6 +13,7 @@ int main(int argc, char *argv[]) {
         UIDevice.currentDevice.batteryMonitoringEnabled = YES;
         XLStartControlServer();
         XLStartStatusServer();
+        XLStartFileTransferServer();
         // launchd may start before the display server is ready after boot.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC),
                        dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{

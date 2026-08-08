@@ -4,6 +4,7 @@
 
 static const uint16_t XLControlPort = 6203;
 static const uint16_t XLStatusPort = 6204;
+static const uint16_t XLFileTransferPort = 6205;
 static const uint8_t XLProtocolVersion = 1;
 static const uint32_t XLMaxMessagePayload = 1024 * 1024;
 
@@ -36,6 +37,7 @@ enum XLSystemAction : uint16_t {
     XLSystemActionWake = 2,
     XLSystemActionLock = 3,
     XLSystemActionScreenshot = 4,
+    XLSystemActionAppSwitcher = 5,
 };
 
 enum XLCapability : uint32_t {
@@ -44,6 +46,7 @@ enum XLCapability : uint32_t {
     XLCapabilitySystemActions = 1u << 2,
     XLCapabilityStatus = 1u << 3,
     XLCapabilityKeyframeRequest = 1u << 4,
+    XLCapabilityFileTransfer = 1u << 5,
 };
 
 enum XLDeviceStatusFlag : uint16_t {

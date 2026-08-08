@@ -6,7 +6,7 @@
     <string>com.jibeib.xlstreamd</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/XLStream.app/XLStreamLauncher</string>
+        <string>/Applications/XLStream.app/bin/xlstreamd</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

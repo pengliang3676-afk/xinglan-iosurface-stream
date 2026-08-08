@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <atomic>
 #include <netinet/in.h>
+#include <notify.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -66,7 +67,8 @@ static BOOL XLWriteHelloAck(int client, uint32_t sequence) {
                                  XLCapabilityTouch |
                                  XLCapabilitySystemActions |
                                  XLCapabilityStatus |
-                                 XLCapabilityKeyframeRequest);
+                                 XLCapabilityKeyframeRequest |
+                                 XLCapabilityFileTransfer);
     payload.screenWidth = htons(XLVideoWidth);
     payload.screenHeight = htons(XLVideoHeight);
     payload.protocolVersion = htons(XLProtocolVersion);
@@ -89,6 +91,16 @@ static uint32_t XLHandleTouch(XLHIDSender *sender, const NSData *data) {
                          pressure:pressure] ? 0 : 4;
 }
 
+static int XLScreenIsOn(void) {
+    int token = 0;
+    uint64_t state = 0;
+    int result = notify_register_check("com.apple.iokit.hid.displayStatus", &token);
+    if (result != NOTIFY_STATUS_OK) return -1;
+    result = notify_get_state(token, &state);
+    notify_cancel(token);
+    return result == NOTIFY_STATUS_OK ? (state != 0 ? 1 : 0) : -1;
+}
+
 static uint32_t XLHandleSystemAction(XLHIDSender *sender, const NSData *data) {
     if (data.length != sizeof(XLSystemActionPayload)) return 2;
     XLSystemActionPayload payload = {};
@@ -96,11 +108,22 @@ static uint32_t XLHandleSystemAction(XLHIDSender *sender, const NSData *data) {
     switch ((XLSystemAction)ntohs(payload.action)) {
         case XLSystemActionHome:
             return [sender sendHomeButton] ? 0 : 4;
-        case XLSystemActionWake:
-        case XLSystemActionLock:
-            return [sender sendPowerButton] ? 0 : 4;
+        case XLSystemActionWake: {
+            int state = XLScreenIsOn();
+            if (state != 1) {
+                if (![sender sendPowerButton]) return 4;
+                usleep(350000);
+            }
+            return [sender sendHomeButton] ? 0 : 4;
+        }
+        case XLSystemActionLock: {
+            int state = XLScreenIsOn();
+            return state == 0 || [sender sendPowerButton] ? 0 : 4;
+        }
         case XLSystemActionScreenshot:
             return 5;
+        case XLSystemActionAppSwitcher:
+            return [sender sendAppSwitcher] ? 0 : 4;
     }
     return 3;
 }

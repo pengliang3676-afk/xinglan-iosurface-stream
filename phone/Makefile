@@ -12,7 +12,7 @@ XLStreamLauncher_FRAMEWORKS = Foundation
 XLStreamLauncher_CODESIGN_FLAGS = -SLauncherEntitlements.plist
 XLStreamLauncher_INSTALL_PATH = /Applications/XLStream.app
 
-xlstreamd_FILES = main.mm XLFrameSource.mm XLVideoServer.mm XLControlServer.mm XLStatusServer.mm XLHIDSender.mm
+xlstreamd_FILES = main.mm XLFrameSource.mm XLVideoServer.mm XLControlServer.mm XLStatusServer.mm XLFileTransferServer.mm XLHIDSender.mm
 xlstreamd_CFLAGS = -fobjc-arc -std=c++17 -Wall -Wextra -Wno-error -Wno-deprecated-declarations -Wno-module-import-in-extern-c
 xlstreamd_FRAMEWORKS = Foundation UIKit IOSurface VideoToolbox CoreMedia CoreVideo QuartzCore IOKit Security
 xlstreamd_CODESIGN_FLAGS = -SEntitlements.plist

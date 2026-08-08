@@ -70,7 +70,8 @@ static void XLHandleStatusClient(int client) {
                                    XLCapabilityTouch |
                                    XLCapabilitySystemActions |
                                    XLCapabilityStatus |
-                                   XLCapabilityKeyframeRequest);
+                                   XLCapabilityKeyframeRequest |
+                                   XLCapabilityFileTransfer);
         hello.screenWidth = htons(XLVideoWidth);
         hello.screenHeight = htons(XLVideoHeight);
         hello.protocolVersion = htons(XLProtocolVersion);
