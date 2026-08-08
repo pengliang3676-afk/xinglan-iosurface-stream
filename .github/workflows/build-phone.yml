@@ -13,14 +13,14 @@ jobs:
       - name: Install Theos
         run: |
           brew install ldid xz
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
 
       - name: Build rootless package
         env:
           THEOS: ${{ runner.temp }}/theos-link
         run: |
           ln -s "$HOME/theos" "$THEOS"
-          make -C phone clean package FINALPACKAGE=1
+          make -C phone clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 
       - name: Collect package
         run: |
