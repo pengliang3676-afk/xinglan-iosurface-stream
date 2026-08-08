@@ -1202,6 +1202,18 @@ class XinglanApp:
         window.resizable(False, False)
         window.configure(bg="#101828")
         window.transient(self.root)
+        # 将传输窗口放在投屏主窗口正中，而不是固定出现在屏幕左上角。
+        # 先让 Tk 计算出窗口实际尺寸，再按主窗口的屏幕坐标定位。
+        window.update_idletasks()
+        parent_x = self.root.winfo_rootx()
+        parent_y = self.root.winfo_rooty()
+        parent_w = self.root.winfo_width()
+        parent_h = self.root.winfo_height()
+        dialog_w = window.winfo_width()
+        dialog_h = window.winfo_height()
+        center_x = parent_x + max(0, (parent_w - dialog_w) // 2)
+        center_y = parent_y + max(0, (parent_h - dialog_h) // 2)
+        window.geometry(f"{dialog_w}x{dialog_h}+{center_x}+{center_y}")
 
         selected_path = tk.StringVar(value="")
         selected_text = tk.StringVar(value="尚未选择文件")
