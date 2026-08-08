@@ -415,9 +415,9 @@ class XinglanApp:
         self.wall = tk.Frame(self.left_panel, bg="#0b1220")
         self.wall.pack(fill="both", expand=True)
         for column in range(WALL_COLUMNS):
-            self.wall.grid_columnconfigure(column, weight=1)
+            self.wall.grid_columnconfigure(column, weight=1, uniform="wall-columns")
         for row in range(WALL_ROWS):
-            self.wall.grid_rowconfigure(row, weight=1)
+            self.wall.grid_rowconfigure(row, weight=1, uniform="wall-rows")
 
         self.scan_devices()
         if not self.tiles and not self.empty_slots:
