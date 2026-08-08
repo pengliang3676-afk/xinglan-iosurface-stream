@@ -158,7 +158,6 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
                                                   0.0,
                                                   0.0,
                                                   0.0,
-                                                  0.0,
                                                   false,
                                                   touching,
                                                   0);
