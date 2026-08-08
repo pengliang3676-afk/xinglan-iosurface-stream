@@ -52,6 +52,7 @@ static const NSInteger XLBufferCount = 3;
                                            (__bridge CFDictionaryRef)surfaceAttributes,
                                            &_sourceBuffer);
     if (result != kCVReturnSuccess || !_sourceBuffer || !CVPixelBufferGetIOSurface(_sourceBuffer)) {
+        NSLog(@"[xlstreamd] source IOSurface create failed: %d", result);
         return nil;
     }
 
@@ -62,10 +63,15 @@ static const NSInteger XLBufferCount = 3;
                                      kCVPixelFormatType_32BGRA,
                                      (__bridge CFDictionaryRef)surfaceAttributes,
                                      &_outputBuffers[index]);
-        if (result != kCVReturnSuccess || !_outputBuffers[index]) return nil;
+        if (result != kCVReturnSuccess || !_outputBuffers[index]) {
+            NSLog(@"[xlstreamd] output IOSurface %ld create failed: %d", (long)index, result);
+            return nil;
+        }
     }
 
-    if (VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession) != noErr || !_transferSession) {
+    OSStatus transferStatus = VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession);
+    if (transferStatus != noErr || !_transferSession) {
+        NSLog(@"[xlstreamd] pixel transfer session create failed: %d", transferStatus);
         return nil;
     }
     VTSessionSetProperty(_transferSession,
@@ -118,6 +124,10 @@ static const NSInteger XLBufferCount = 3;
                                                            _sourceBuffer,
                                                            _outputBuffers[selected]);
     if (status != noErr) {
+        static dispatch_once_t transferErrorOnce;
+        dispatch_once(&transferErrorOnce, ^{
+            NSLog(@"[xlstreamd] pixel transfer failed: %d", status);
+        });
         [self releaseSlot:selected];
         return NO;
     }

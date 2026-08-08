@@ -14,5 +14,31 @@
     <true/>
     <key>com.apple.private.hid.client.event-dispatch.internal</key>
     <true/>
+    <key>com.apple.QuartzCore.displayable-context</key>
+    <true/>
+    <key>com.apple.QuartzCore.global-capture</key>
+    <true/>
+    <key>com.apple.QuartzCore.secure-mode</key>
+    <true/>
+    <key>com.apple.backboard.client</key>
+    <true/>
+    <key>com.apple.hid.manager.user-access</key>
+    <true/>
+    <key>com.apple.hid.multitouch.user-access</key>
+    <true/>
+    <key>com.apple.hid.system.user-access-service</key>
+    <true/>
+    <key>com.apple.private.hid.manager.client</key>
+    <true/>
+    <key>com.apple.security.iokit-user-client-class</key>
+    <array>
+        <string>AppleSPUHIDDeviceUserClient</string>
+        <string>AppleSPUHIDDriverUserClient</string>
+        <string>IOHIDEventServiceFastPathUserClient</string>
+        <string>IOHIDLibUserClient</string>
+        <string>IOMobileFramebufferUserClient</string>
+        <string>IOSurfaceAcceleratorClient</string>
+        <string>IOSurfaceRootUserClient</string>
+    </array>
 </dict>
 </plist>

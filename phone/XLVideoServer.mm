@@ -153,7 +153,10 @@ static VTCompressionSessionRef XLCreateEncoder(XLConnectionContext *context) {
                                                   XLEncoderCallback,
                                                   context,
                                                   &encoder);
-    if (status != noErr || !encoder) return NULL;
+    if (status != noErr || !encoder) {
+        NSLog(@"[xlstreamd] H.264 encoder create failed: %d", status);
+        return NULL;
+    }
 
     VTSessionSetProperty(encoder, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     VTSessionSetProperty(encoder, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
@@ -210,6 +213,8 @@ static void XLHandleVideoClient(int client) {
                                                                         height:XLVideoHeight];
         VTCompressionSessionRef encoder = frameSource ? XLCreateEncoder(&context) : NULL;
         if (!frameSource || !encoder) {
+            NSLog(@"[xlstreamd] video client init failed: frameSource=%@ encoder=%p",
+                  frameSource ? @"yes" : @"no", encoder);
             close(client);
             return;
         }
