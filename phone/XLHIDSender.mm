@@ -11,6 +11,7 @@ typedef void (*XLDispatchEventFn)(IOHIDEventSystemClientRef, IOHIDEventRef);
 typedef void (*XLAppendEventFn)(IOHIDEventRef, IOHIDEventRef, uint32_t);
 typedef void (*XLSetIntegerValueFn)(IOHIDEventRef, uint32_t, CFIndex);
 typedef void (*XLSetFloatValueFn)(IOHIDEventRef, uint32_t, double);
+typedef void (*XLSetSenderIDFn)(IOHIDEventRef, uint64_t);
 typedef IOHIDEventRef (*XLDigitizerEventFn)(CFAllocatorRef,
                                             uint64_t,
                                             uint32_t,
@@ -52,6 +53,18 @@ static const uint32_t XLDigitizerEventPosition = 1u << 2;
 static const uint32_t XLDigitizerMajorRadius = 0xB0014;
 static const uint32_t XLDigitizerMinorRadius = 0xB0015;
 static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
+// These are the private digitizer fields used by the iOS HID dispatcher.
+// A parent (hand) event must advertise its child collection explicitly;
+// otherwise IOHIDEventSystemClientDispatchEvent can accept the event while
+// SpringBoard silently ignores it.
+static const uint32_t XLEventFieldIsBuiltIn = 0x00000004;
+static const uint32_t XLDigitizerEventMask = 0xB0007;
+static const uint32_t XLDigitizerRange = 0xB0008;
+static const uint32_t XLDigitizerTouch = 0xB0009;
+// Known-good synthetic sender id used by TrollVNC/iOS HID generators on
+// iOS 14.8 through current releases. Without a sender id SpringBoard may
+// silently discard an otherwise valid dispatched event.
+static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
 
 @implementation XLHIDSender {
     void *_ioKitHandle;
@@ -60,6 +73,7 @@ static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
     XLAppendEventFn _appendEvent;
     XLSetIntegerValueFn _setIntegerValue;
     XLSetFloatValueFn _setFloatValue;
+    XLSetSenderIDFn _setSenderID;
     XLDigitizerEventFn _createDigitizerEvent;
     XLFingerEventFn _createFingerEvent;
     XLKeyboardEventFn _createKeyboardEvent;
@@ -79,6 +93,7 @@ static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
     _setIntegerValue =
         (XLSetIntegerValueFn)dlsym(_ioKitHandle, "IOHIDEventSetIntegerValue");
     _setFloatValue = (XLSetFloatValueFn)dlsym(_ioKitHandle, "IOHIDEventSetFloatValue");
+    _setSenderID = (XLSetSenderIDFn)dlsym(_ioKitHandle, "IOHIDEventSetSenderID");
     _createDigitizerEvent =
         (XLDigitizerEventFn)dlsym(_ioKitHandle, "IOHIDEventCreateDigitizerEvent");
     _createFingerEvent =
@@ -96,7 +111,7 @@ static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
 
 - (BOOL)isReady {
     return _client && _dispatchEvent && _appendEvent && _setIntegerValue &&
-        _setFloatValue && _createDigitizerEvent && _createFingerEvent;
+        _setFloatValue && _setSenderID && _createDigitizerEvent && _createFingerEvent;
 }
 
 - (BOOL)sendTouchPhase:(XLTouchPhase)phase
@@ -110,19 +125,34 @@ static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
     pressure = MAX(0.0, MIN(1.0, pressure));
 
     BOOL touching = phase == XLTouchPhaseDown || phase == XLTouchPhaseMove;
-    uint32_t childMask = phase == XLTouchPhaseMove
-        ? XLDigitizerEventPosition
-        : (XLDigitizerEventTouch | XLDigitizerEventRange);
-    uint32_t parentMask = phase == XLTouchPhaseMove ? 0 : XLDigitizerEventTouch;
+    uint32_t childMask = 0;
+    switch (phase) {
+        case XLTouchPhaseDown:
+            childMask = XLDigitizerEventRange | XLDigitizerEventTouch;
+            break;
+        case XLTouchPhaseMove:
+            childMask = XLDigitizerEventPosition;
+            break;
+        case XLTouchPhaseUp:
+            childMask = XLDigitizerEventTouch;
+            break;
+        case XLTouchPhaseCancel:
+            childMask = XLDigitizerEventTouch;
+            break;
+    }
     uint64_t timestamp = mach_absolute_time();
-    uint32_t identity = MAX((uint32_t)1, (uint32_t)finger + 1);
+    uint32_t index = (uint32_t)finger;
+    // iOS' digitizer helpers use identity 3 for a finger transducer.  The
+    // index remains the caller's finger slot (normally 0).
+    uint32_t identity = 3;
 
     IOHIDEventRef parent = _createDigitizerEvent(kCFAllocatorDefault,
                                                   timestamp,
                                                   3,
+                                                  99,
+                                                  1,
                                                   0,
                                                   0,
-                                                  parentMask,
                                                   0,
                                                   0.0,
                                                   0.0,
@@ -134,7 +164,7 @@ static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
                                                   0);
     IOHIDEventRef child = _createFingerEvent(kCFAllocatorDefault,
                                               timestamp,
-                                              identity,
+                                              index,
                                               identity,
                                               childMask,
                                               x,
@@ -150,11 +180,18 @@ static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
         if (child) CFRelease(child);
         return NO;
     }
+    // Mark the collection as an integrated built-in display touch source.
+    // These fields are the important difference from a merely well-formed
+    // digitizer event: SpringBoard filters out events without them.
     _setIntegerValue(parent, XLDigitizerIsDisplayIntegrated, 1);
-    _setIntegerValue(child, XLDigitizerIsDisplayIntegrated, 1);
+    _setIntegerValue(parent, XLEventFieldIsBuiltIn, 1);
     _setFloatValue(child, XLDigitizerMajorRadius, 0.04);
     _setFloatValue(child, XLDigitizerMinorRadius, 0.04);
     _appendEvent(parent, child, 0);
+    _setIntegerValue(parent, XLDigitizerEventMask, 0x23);
+    _setIntegerValue(parent, XLDigitizerRange, 1);
+    _setIntegerValue(parent, XLDigitizerTouch, 1);
+    _setSenderID(parent, XLSyntheticSenderID);
     _dispatchEvent(_client, parent);
     CFRelease(child);
     CFRelease(parent);
@@ -172,6 +209,8 @@ static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
         if (up) CFRelease(up);
         return NO;
     }
+    _setSenderID(down, XLSyntheticSenderID);
+    _setSenderID(up, XLSyntheticSenderID);
     _dispatchEvent(_client, down);
     _dispatchEvent(_client, up);
     CFRelease(down);
