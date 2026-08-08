@@ -1,9 +1,21 @@
 #import "XLFrameSource.h"
 #import "XLPrivateSurface.h"
 
+#import <IOKit/IOKitLib.h>
 #import <UIKit/UIKit.h>
 #import <VideoToolbox/VideoToolbox.h>
+#import <mach/mach.h>
 #import <os/lock.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+typedef CFTypeRef XLSecTaskRef;
+
+extern "C" XLSecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
+extern "C" CFTypeRef SecTaskCopyValueForEntitlement(XLSecTaskRef task,
+                                                       CFStringRef entitlement,
+                                                       CFErrorRef *error);
+extern "C" int csops(pid_t pid, unsigned int operation, void *userAddress, size_t userSize);
 
 extern "C" void CARenderServerRenderDisplay(int display,
                                               CFStringRef displayName,
@@ -12,6 +24,66 @@ extern "C" void CARenderServerRenderDisplay(int display,
                                               int y);
 
 static const NSInteger XLBufferCount = 3;
+
+static void XLLogRuntimeSecurityState(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSLog(@"[xlstreamd] build=0.3.1-roothide");
+        uint32_t codeSigningFlags = 0;
+        int codeSigningResult = csops(getpid(), 0, &codeSigningFlags, sizeof(codeSigningFlags));
+        NSLog(@"[xlstreamd] runtime pid=%d uid=%u euid=%u gid=%u egid=%u csops=%d flags=0x%08x",
+              getpid(),
+              getuid(),
+              geteuid(),
+              getgid(),
+              getegid(),
+              codeSigningResult,
+              codeSigningFlags);
+
+        XLSecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+        NSArray<NSString *> *keys = @[
+            @"platform-application",
+            @"com.apple.private.security.no-sandbox",
+            @"com.apple.private.security.storage.AppBundles",
+            @"com.apple.private.security.storage.AppDataContainers",
+            @"com.apple.QuartzCore.global-capture",
+            @"com.apple.QuartzCore.secure-capture",
+            @"com.apple.security.iokit-user-client-class",
+        ];
+        if (task) {
+            for (NSString *key in keys) {
+                CFErrorRef error = nil;
+                CFTypeRef value = SecTaskCopyValueForEntitlement(
+                    task,
+                    (__bridge CFStringRef)key,
+                    &error);
+                NSLog(@"[xlstreamd] entitlement %@=%@ error=%@",
+                      key,
+                      value ? (__bridge id)value : @"<missing>",
+                      error ? (__bridge id)error : @"<none>");
+                if (value) CFRelease(value);
+                if (error) CFRelease(error);
+            }
+            CFRelease(task);
+        } else {
+            NSLog(@"[xlstreamd] SecTaskCreateFromSelf failed");
+        }
+
+        io_service_t service = IOServiceGetMatchingService(
+            kIOMasterPortDefault,
+            IOServiceMatching("IOSurfaceRoot"));
+        io_connect_t connection = MACH_PORT_NULL;
+        kern_return_t openResult = service
+            ? IOServiceOpen(service, mach_task_self(), 0, &connection)
+            : KERN_FAILURE;
+        NSLog(@"[xlstreamd] IOSurfaceRoot service=%u open=%d connection=%u",
+              service,
+              openResult,
+              connection);
+        if (connection != MACH_PORT_NULL) IOServiceClose(connection);
+        if (service) IOObjectRelease(service);
+    });
+}
 
 static CVPixelBufferRef XLCreateSharedPixelBuffer(size_t width, size_t height) {
     const size_t bytesPerElement = 4;
@@ -68,6 +140,8 @@ static CVPixelBufferRef XLCreateSharedPixelBuffer(size_t width, size_t height) {
 - (instancetype)initWithOutputWidth:(size_t)width height:(size_t)height {
     self = [super init];
     if (!self) return nil;
+
+    XLLogRuntimeSecurityState();
 
     _outputWidth = width;
     _outputHeight = height;
