@@ -2,7 +2,17 @@
 set -e
 
 PLIST="/var/jb/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
+APP="/var/jb/Applications/XLStream.app"
 launchctl bootout system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
+killall XLStreamLauncher >/dev/null 2>&1 || true
+killall xlstreamd >/dev/null 2>&1 || true
+chown -R root:wheel "$APP" >/dev/null 2>&1 || true
+chmod 755 "$APP" "$APP/XLStreamLauncher" "$APP/bin" "$APP/bin/xlstreamd" >/dev/null 2>&1 || true
+if [ -x /var/jb/usr/bin/uicache ]; then
+    /var/jb/usr/bin/uicache -p "$APP" >/dev/null 2>&1 || true
+elif command -v uicache >/dev/null 2>&1; then
+    uicache -p "$APP" >/dev/null 2>&1 || true
+fi
 launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || launchctl load "$PLIST" >/dev/null 2>&1 || true
 launchctl kickstart -k system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
 exit 0

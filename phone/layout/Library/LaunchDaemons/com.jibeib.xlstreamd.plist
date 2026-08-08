@@ -6,7 +6,7 @@
     <string>com.jibeib.xlstreamd</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/var/jb/usr/libexec/xlstreamd</string>
+        <string>/var/jb/Applications/XLStream.app/XLStreamLauncher</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

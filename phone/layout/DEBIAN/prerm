@@ -3,4 +3,6 @@
 PLIST="/var/jb/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
 launchctl bootout system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
 launchctl unload "$PLIST" >/dev/null 2>&1 || true
+killall XLStreamLauncher >/dev/null 2>&1 || true
+killall xlstreamd >/dev/null 2>&1 || true
 exit 0

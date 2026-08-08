@@ -1,7 +1,7 @@
 Package: com.jibeib.xlstream
 Name: 星澜投屏
 Depends: firmware (>= 15.0)
-Version: 0.2.2
+Version: 0.2.3
 Architecture: iphoneos-arm64
 Description: Clean-room IOSurface, VideoToolbox and HID USB control daemon for owned devices.
 Maintainer: jibeib
