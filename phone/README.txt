@@ -16,7 +16,7 @@ VTPixelTransferSession和VideoToolbox自行实现。
 4. 三缓冲槽位；编码器繁忙时直接丢弃新帧，不建立无限队列。
 5. 手机到电脑采用新的XLV3分包协议，视频端口为6202。
 6. socket发送最多阻塞300毫秒，电脑不读取时主动断开，避免拖死SpringBoard。
-7. 旧6002视频链路保留作对照和回退。
+7. Windows正式测试客户端只连接6202，不再回退旧6002视频链路。
 
 当前阶段
 ========
@@ -29,4 +29,3 @@ VTPixelTransferSession和VideoToolbox自行实现。
 
 需要Theos、iOS 15 SDK和arm64/arm64e工具链。当前Windows电脑没有本地clang/Theos
 构建环境，使用项目的GitHub Actions构建流程生成rootless deb。
-

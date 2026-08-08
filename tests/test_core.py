@@ -21,7 +21,7 @@ from xinglan.protocol import (
     touch_message,
 )
 from xinglan.diagnostics import ProcessLoadSampler, working_set_mb
-from xinglan.session import LatestFrame
+from xinglan.session import LatestFrame, prepare_xlv3_image
 
 
 class ProtocolTests(unittest.TestCase):
@@ -65,6 +65,10 @@ class ProtocolTests(unittest.TestCase):
         sequence, _, image = slot.snapshot()
         self.assertEqual(2, sequence)
         self.assertIs(second, image)
+
+    def test_xlv3_frame_orientation_is_unchanged(self) -> None:
+        image = Image.new("RGB", (2, 3), "green")
+        self.assertIs(image, prepare_xlv3_image(image))
 
     def test_process_memory_metric(self) -> None:
         self.assertGreater(working_set_mb(), 0.0)

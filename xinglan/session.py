@@ -11,16 +11,12 @@ from .bootstrap import configure_dependencies
 
 configure_dependencies()
 
-from PIL import Image, ImageOps  # noqa: E402
+from PIL import Image  # noqa: E402
 
 from .protocol import (
-    VIDEO_HEADER_SIZE,
     VIDEO_HEADER_V3_SIZE,
-    VIDEO_MAGIC,
     VIDEO_MAGIC_V3,
     VIDEO_PACKET_HEADER_SIZE,
-    parse_frame_size,
-    parse_video_header,
     parse_video_header_v3,
     parse_video_packet_header,
     touch_message,
@@ -68,6 +64,11 @@ class LatestFrame:
             return self._sequence, self._received_at, self._image
 
 
+def prepare_xlv3_image(image: Image.Image) -> Image.Image:
+    """XLV3/IOSurface already supplies an upright portrait frame."""
+    return image
+
+
 @dataclass(frozen=True)
 class SessionStats:
     status: str
@@ -79,7 +80,6 @@ class SessionStats:
 
 class DeviceSession:
     VIDEO_PORT_NEW = 6202
-    VIDEO_PORT_FALLBACK = 6002
     TOUCH_PORT = 6000
 
     def __init__(self, udid: str) -> None:
@@ -170,25 +170,15 @@ class DeviceSession:
             connection = None
             try:
                 self._set_state("正在连接视频")
-                selected_port = 0
-                failures: list[str] = []
-                for port in (self.VIDEO_PORT_NEW, self.VIDEO_PORT_FALLBACK):
-                    try:
-                        connection = await asyncio.wait_for(
-                            ServiceConnection.create_using_usbmux(
-                                self.udid, port, connection_type="USB"
-                            ),
-                            timeout=3.0,
-                        )
-                        selected_port = port
-                        break
-                    except Exception as exc:
-                        failures.append(f"{port}:{exc}")
-                if connection is None:
-                    raise ConnectionError("；".join(failures))
+                connection = await asyncio.wait_for(
+                    ServiceConnection.create_using_usbmux(
+                        self.udid, self.VIDEO_PORT_NEW, connection_type="USB"
+                    ),
+                    timeout=3.0,
+                )
                 # 一旦真正连通，下一次异常从快速重连重新开始，不沿用旧退避时间。
                 delay = 0.5
-                await self._receive_video(connection, selected_port)
+                await self._receive_video(connection)
                 raise ConnectionError("视频连接已结束")
             except asyncio.CancelledError:
                 raise
@@ -205,41 +195,33 @@ class DeviceSession:
                     except Exception:
                         pass
 
-    async def _receive_video(self, connection: Any, port: int) -> None:
+    async def _receive_video(self, connection: Any) -> None:
         magic = await read_exact(connection, 4, 5.0)
-        if magic == VIDEO_MAGIC:
-            header_bytes = magic + await read_exact(connection, VIDEO_HEADER_SIZE - 4, 5.0)
-            header = parse_video_header(header_bytes)
-        elif magic == VIDEO_MAGIC_V3:
-            header_bytes = magic + await read_exact(connection, VIDEO_HEADER_V3_SIZE - 4, 5.0)
-            header = parse_video_header_v3(header_bytes)
-        else:
-            raise ValueError(f"未知视频握手：{magic!r}")
+        if magic != VIDEO_MAGIC_V3:
+            raise ValueError(f"手机未运行星澜XLV3投屏服务：{magic!r}")
+        header_bytes = magic + await read_exact(connection, VIDEO_HEADER_V3_SIZE - 4, 5.0)
+        header = parse_video_header_v3(header_bytes)
         decoder = av.CodecContext.create("h264", "r")
-        mode = "新IOSurface" if header.protocol == "XLV3" else "旧链路回退"
-        self._set_state(f"投屏中 {header.width}×{header.height} · {mode} · {port}")
+        self._set_state(
+            f"投屏中 {header.width}×{header.height} · 新IOSurface · {self.VIDEO_PORT_NEW}"
+        )
         frame_count = 0
         window_started = time.monotonic()
         while not self._stop.is_set():
-            if header.protocol == "XLV3":
-                packet = parse_video_packet_header(
-                    await read_exact(connection, VIDEO_PACKET_HEADER_SIZE, 3.5)
-                )
-                payload = (
-                    await read_exact(connection, packet.payload_length, 3.5)
-                    if packet.payload_length
-                    else b""
-                )
-                if packet.packet_type != 1:
-                    continue
-                encoded = payload
-            else:
-                size = parse_frame_size(await read_exact(connection, 4, 3.5))
-                encoded = await read_exact(connection, size, 3.5)
+            packet = parse_video_packet_header(
+                await read_exact(connection, VIDEO_PACKET_HEADER_SIZE, 3.5)
+            )
+            payload = (
+                await read_exact(connection, packet.payload_length, 3.5)
+                if packet.payload_length
+                else b""
+            )
+            if packet.packet_type != 1:
+                continue
+            encoded = payload
             decoded = decoder.decode(av.Packet(encoded))
             for frame in decoded:
-                # SE2 现有手机端输出方向已在旧版真机验证；这里只在内存中校正。
-                image = ImageOps.mirror(frame.to_image().rotate(180))
+                image = prepare_xlv3_image(frame.to_image())
                 self.latest.publish(image)
                 frame_count += 1
             now = time.monotonic()
