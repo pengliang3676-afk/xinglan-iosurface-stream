@@ -16,7 +16,9 @@
     <integer>3</integer>
     <key>UserName</key>
     <string>root</string>
-    <key>ProcessType</key>
-    <string>Interactive</string>
+    <key>POSIXSpawnType</key>
+    <string>App</string>
+    <key>HighPriorityIO</key>
+    <true/>
 </dict>
 </plist>

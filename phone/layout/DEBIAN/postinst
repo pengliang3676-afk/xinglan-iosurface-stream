@@ -4,8 +4,5 @@ set -e
 PLIST="/var/jb/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
 launchctl bootout system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
 launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || launchctl load "$PLIST" >/dev/null 2>&1 || true
-
-if command -v sbreload >/dev/null 2>&1; then
-    sbreload || true
-fi
+launchctl kickstart -k system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
 exit 0
