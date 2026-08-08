@@ -119,8 +119,12 @@ async def send_action_to_devices(
     udids: Iterable[str], action: str
 ) -> dict[str, bool]:
     ordered = list(dict.fromkeys(udids))
-    # Avoid opening dozens of usbmux handshakes at exactly the same instant.
-    semaphore = asyncio.Semaphore(12)
+    # The action is deliberately broadcast-like: all USB phones should
+    # receive the wake/lock command in the same moment.  A small semaphore
+    # made 60 phones run in five visible batches, which looked like one-by-one
+    # screen changes.  Keep only a light safety cap above the supported 60
+    # devices so usbmux can perform the handshakes concurrently.
+    semaphore = asyncio.Semaphore(64)
 
     async def send_one(udid: str) -> bool:
         async with semaphore:

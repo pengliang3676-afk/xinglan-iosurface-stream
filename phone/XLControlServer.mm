@@ -7,6 +7,8 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
 
 #include <arpa/inet.h>
 #include <atomic>
@@ -97,6 +99,24 @@ static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
     if (data.length == 0 || data.length > XLMaxMessagePayload) return 2;
     NSString *text = [[NSString alloc] initWithData:(NSData *)data encoding:NSUTF8StringEncoding];
     if (!text.length) return 3;
+    // UIKit's private keyboard insertion path handles Chinese, emoji and
+    // composed input directly.  It is the same path used by EagleEye's
+    // text-input implementation; keep the clipboard shortcut as fallback
+    // for iOS versions where UIKeyboardImpl is unavailable.
+    __block BOOL inserted = NO;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        Class keyboardClass = NSClassFromString(@"UIKeyboardImpl");
+        SEL sharedSelector = NSSelectorFromString(@"sharedInstance");
+        SEL insertSelector = NSSelectorFromString(@"insertText:");
+        if (!keyboardClass || ![keyboardClass respondsToSelector:sharedSelector]) return;
+        id (*sendObject)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+        id keyboard = sendObject((id)keyboardClass, sharedSelector);
+        if (!keyboard || ![keyboard respondsToSelector:insertSelector]) return;
+        void (*sendText)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
+        sendText(keyboard, insertSelector, text);
+        inserted = YES;
+    });
+    if (inserted) return 0;
     UIPasteboard.generalPasteboard.string = text;
     return [sender sendPasteShortcut] ? 0 : 4;
 }
