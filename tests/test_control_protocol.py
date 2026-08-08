@@ -13,6 +13,7 @@ from xinglan.control_protocol import (
     HEADER,
     HELLO,
     PROTOCOL_VERSION,
+    KeyCommand,
     MessageType,
     SystemAction,
     TouchCommand,
@@ -20,8 +21,10 @@ from xinglan.control_protocol import (
     pack_hello,
     pack_header,
     pack_keyframe_request,
+    pack_key_event,
     pack_message,
     pack_system_action,
+    pack_text_input,
     pack_touch,
     unpack_ack,
     unpack_header,
@@ -72,11 +75,25 @@ class ControlProtocolTests(unittest.TestCase):
 
     def test_control_commands_have_sequences(self) -> None:
         home = pack_system_action(SystemAction.HOME, 41)
+        switcher = pack_system_action(SystemAction.APP_SWITCHER, 43)
         keyframe = pack_keyframe_request(42)
         self.assertEqual(MessageType.SYSTEM_ACTION, unpack_header(home[:HEADER.size]).message_type)
         self.assertEqual(41, unpack_header(home[:HEADER.size]).sequence)
         self.assertEqual(MessageType.REQUEST_KEYFRAME, unpack_header(keyframe[:HEADER.size]).message_type)
         self.assertEqual(42, unpack_header(keyframe[:HEADER.size]).sequence)
+        self.assertEqual(MessageType.SYSTEM_ACTION, unpack_header(switcher[:HEADER.size]).message_type)
+        self.assertEqual(43, unpack_header(switcher[:HEADER.size]).sequence)
+
+    def test_text_input_is_utf8_and_key_event_has_usage(self) -> None:
+        text = pack_text_input("鹰眼中文🙂", 51)
+        text_header = unpack_header(text[:HEADER.size], CONTROL_MAGIC)
+        self.assertEqual(MessageType.TEXT_INPUT, text_header.message_type)
+        self.assertEqual("鹰眼中文🙂".encode("utf-8"), text[HEADER.size:])
+
+        key = pack_key_event(KeyCommand(0x07, 0x28), 52)
+        key_header = unpack_header(key[:HEADER.size], CONTROL_MAGIC)
+        self.assertEqual(MessageType.KEY_EVENT, key_header.message_type)
+        self.assertEqual(b"\x00\x00\x00\x07\x00\x00\x00\x28", key[HEADER.size:])
 
     def test_ack_round_trip(self) -> None:
         packet = pack_message(CONTROL_MAGIC, MessageType.ACK, 8, ACK.pack(7, 0))

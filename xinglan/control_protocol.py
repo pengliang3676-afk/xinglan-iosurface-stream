@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 CONTROL_PORT = 6203
 STATUS_PORT = 6204
+FILE_PORT = 6205
 PROTOCOL_VERSION = 1
 CONTROL_MAGIC = b"XLC1"
 STATUS_MAGIC = b"XLS1"
@@ -27,6 +28,8 @@ class MessageType(enum.IntEnum):
     TOUCH = 10
     SYSTEM_ACTION = 11
     REQUEST_KEYFRAME = 12
+    TEXT_INPUT = 13
+    KEY_EVENT = 14
     PING = 20
     PONG = 21
     ACK = 22
@@ -42,11 +45,18 @@ class TouchPhase(enum.IntEnum):
     CANCEL = 3
 
 
+@dataclass(frozen=True)
+class KeyCommand:
+    page: int
+    usage: int
+
+
 class SystemAction(enum.IntEnum):
     HOME = 1
     WAKE = 2
     LOCK = 3
     SCREENSHOT = 4
+    APP_SWITCHER = 5
 
 
 @dataclass(frozen=True)
@@ -197,6 +207,20 @@ def pack_system_action(action: SystemAction, sequence: int) -> bytes:
 
 def pack_keyframe_request(sequence: int) -> bytes:
     return pack_message(CONTROL_MAGIC, MessageType.REQUEST_KEYFRAME, sequence)
+
+
+def pack_text_input(text: str, sequence: int) -> bytes:
+    payload = text.encode("utf-8")
+    if not payload or len(payload) > MAX_PAYLOAD:
+        raise ValueError("text input is empty or too large")
+    return pack_message(CONTROL_MAGIC, MessageType.TEXT_INPUT, sequence, payload)
+
+
+def pack_key_event(command: KeyCommand, sequence: int) -> bytes:
+    if not 0 <= command.page <= 0xFFFFFFFF or not 0 <= command.usage <= 0xFFFFFFFF:
+        raise ValueError("invalid HID key usage")
+    payload = struct.pack("!II", command.page, command.usage)
+    return pack_message(CONTROL_MAGIC, MessageType.KEY_EVENT, sequence, payload)
 
 
 def unpack_touch(payload: bytes) -> TouchCommand:

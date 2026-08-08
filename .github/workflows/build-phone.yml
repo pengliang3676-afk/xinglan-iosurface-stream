@@ -6,6 +6,14 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: RootHide
+            scheme: roothide
+          - name: Dopamine-Rootless
+            scheme: rootless
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,12 +25,12 @@ jobs:
           brew install ldid xz
           git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
 
-      - name: Build rootless package
+      - name: Build ${{ matrix.name }} package
         env:
           THEOS: ${{ runner.temp }}/theos-link
         run: |
           ln -s "$HOME/theos" "$THEOS"
-          make -C phone clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          make -C phone clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
 
       - name: Collect package
         run: |
@@ -30,11 +38,11 @@ jobs:
           version="$(awk '/^Version:/{print $2}' phone/control)"
           package="$(find phone/packages -name '*.deb' -print -quit)"
           test -n "$package"
-          cp "$package" "output/XLStream-${version}.deb"
+          cp "$package" "output/XLStream-${version}-${{ matrix.name }}.deb"
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: XLStream-rootless
+          name: XLStream-${{ matrix.name }}
           path: output/*.deb
           if-no-files-found: error

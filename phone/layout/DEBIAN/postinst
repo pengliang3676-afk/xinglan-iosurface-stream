@@ -1,8 +1,13 @@
 #!/bin/sh
 set -e
 
-PLIST="/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
-APP="/Applications/XLStream.app"
+if [ -x /Applications/XLStream.app/XLStreamLauncher ]; then
+    PREFIX=""
+else
+    PREFIX="/var/jb"
+fi
+PLIST="${PREFIX}/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
+APP="${PREFIX}/Applications/XLStream.app"
 launchctl bootout system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
 killall XLStreamLauncher >/dev/null 2>&1 || true
 killall xlstreamd >/dev/null 2>&1 || true

@@ -6,7 +6,10 @@
 #import <UIKit/UIKit.h>
 
 #include <arpa/inet.h>
+#include <grp.h>
 #include <netinet/in.h>
+#include <pwd.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -103,6 +106,33 @@ static NSString *XLTransferDocumentsDirectory(void) {
     return @"/var/mobile/Media/Downloads/星澜传输";
 }
 
+static void XLApplyMobilePermissions(NSString *path, mode_t mode) {
+    if (!path.length) return;
+    struct passwd *mobileAccount = getpwnam("mobile");
+    uid_t owner = mobileAccount ? mobileAccount->pw_uid : 501;
+    gid_t group = mobileAccount ? mobileAccount->pw_gid : 501;
+    struct group *mobileGroup = getgrnam("mobile");
+    if (mobileGroup) group = mobileGroup->gr_gid;
+    const char *fileSystemPath = path.fileSystemRepresentation;
+    if (!fileSystemPath) return;
+    chown(fileSystemPath, owner, group);
+    chmod(fileSystemPath, mode);
+}
+
+static void XLRepairTransferDirectoryPermissions(NSString *directory) {
+    if (!directory.length) return;
+    XLApplyMobilePermissions(directory, 0755);
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSArray<NSString *> *entries = [manager contentsOfDirectoryAtPath:directory error:nil];
+    for (NSString *entry in entries) {
+        NSString *path = [directory stringByAppendingPathComponent:entry];
+        BOOL isDirectory = NO;
+        if ([manager fileExistsAtPath:path isDirectory:&isDirectory]) {
+            XLApplyMobilePermissions(path, isDirectory ? 0755 : 0644);
+        }
+    }
+}
+
 static void XLImportMediaAtPath(NSString *path) {
     NSString *extension = path.pathExtension.lowercaseString;
     NSSet<NSString *> *videoExtensions = [NSSet setWithArray:@[
@@ -175,6 +205,7 @@ static void XLHandleFileClient(int client) {
                     directoryError.localizedDescription ?: @"无法创建保存目录", nil);
                 break;
             }
+            XLRepairTransferDirectoryPermissions(directory);
 
             NSString *destination = XLUniqueDestination(directory, fileName);
             if (![NSFileManager.defaultManager createFileAtPath:destination
@@ -223,6 +254,8 @@ static void XLHandleFileClient(int client) {
                 break;
             }
 
+            XLApplyMobilePermissions(destination, 0644);
+
             if (importPhoto) XLImportMediaAtPath(destination);
             NSString *message = importPhoto
                 ? @"文件已保存，并已提交到系统相册"
@@ -236,6 +269,13 @@ static void XLHandleFileClient(int client) {
 }
 
 static void XLRunFileTransferServer(void) {
+    NSString *directory = XLTransferDocumentsDirectory();
+    [NSFileManager.defaultManager createDirectoryAtPath:directory
+                            withIntermediateDirectories:YES
+                                             attributes:nil
+                                                  error:nil];
+    XLRepairTransferDirectoryPermissions(directory);
+
     int server = socket(AF_INET, SOCK_STREAM, 0);
     if (server < 0) return;
     int enabled = 1;

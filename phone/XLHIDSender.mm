@@ -198,25 +198,28 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
     return YES;
 }
 
-- (BOOL)sendKeyboardPage:(uint32_t)page usage:(uint32_t)usage {
-    if (!_client || !_dispatchEvent || !_createKeyboardEvent) return NO;
-    IOHIDEventRef down = _createKeyboardEvent(
-        kCFAllocatorDefault, mach_absolute_time(), page, usage, true, 0);
-    IOHIDEventRef up = _createKeyboardEvent(
-        kCFAllocatorDefault, mach_absolute_time(), page, usage, false, 0);
-    if (!down || !up) {
-        if (down) CFRelease(down);
-        if (up) CFRelease(up);
-        return NO;
-    }
-    _setSenderID(down, XLSyntheticSenderID);
-    _setSenderID(up, XLSyntheticSenderID);
-    _dispatchEvent(_client, down);
-    usleep(50000);
-    _dispatchEvent(_client, up);
-    CFRelease(down);
-    CFRelease(up);
+- (BOOL)sendKeyboardPage:(uint32_t)page usage:(uint32_t)usage down:(BOOL)isDown {
+    if (!_client || !_dispatchEvent || !_createKeyboardEvent || !_setSenderID) return NO;
+    IOHIDEventRef event = _createKeyboardEvent(
+        kCFAllocatorDefault, mach_absolute_time(), page, usage, isDown, 0);
+    if (!event) return NO;
+    _setSenderID(event, XLSyntheticSenderID);
+    _dispatchEvent(_client, event);
+    CFRelease(event);
     return YES;
+}
+
+- (BOOL)sendKeyboardPage:(uint32_t)page usage:(uint32_t)usage {
+    if (![self sendKeyboardPage:page usage:usage down:YES]) return NO;
+    usleep(50000);
+    return [self sendKeyboardPage:page usage:usage down:NO];
+}
+
+- (BOOL)sendPasteShortcut {
+    if (![self sendKeyboardPage:0x07 usage:0xE3 down:YES]) return NO;
+    BOOL pasted = [self sendKeyboardPage:0x07 usage:0x19];
+    BOOL released = [self sendKeyboardPage:0x07 usage:0xE3 down:NO];
+    return pasted && released;
 }
 
 - (BOOL)sendHomeButton {

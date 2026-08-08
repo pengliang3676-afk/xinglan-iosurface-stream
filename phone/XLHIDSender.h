@@ -16,5 +16,7 @@
 - (BOOL)sendHomeButton;
 - (BOOL)sendPowerButton;
 - (BOOL)sendAppSwitcher;
+- (BOOL)sendKeyboardPage:(uint32_t)page usage:(uint32_t)usage;
+- (BOOL)sendPasteShortcut;
 
 @end

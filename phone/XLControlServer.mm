@@ -6,6 +6,7 @@
 #import "XLVideoServer.h"
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 
 #include <arpa/inet.h>
 #include <atomic>
@@ -68,7 +69,8 @@ static BOOL XLWriteHelloAck(int client, uint32_t sequence) {
                                  XLCapabilitySystemActions |
                                  XLCapabilityStatus |
                                  XLCapabilityKeyframeRequest |
-                                 XLCapabilityFileTransfer);
+                                 XLCapabilityFileTransfer |
+                                 XLCapabilityTextInput);
     payload.screenWidth = htons(XLVideoWidth);
     payload.screenHeight = htons(XLVideoHeight);
     payload.protocolVersion = htons(XLProtocolVersion);
@@ -89,6 +91,21 @@ static uint32_t XLHandleTouch(XLHIDSender *sender, const NSData *data) {
                                 x:x
                                 y:y
                          pressure:pressure] ? 0 : 4;
+}
+
+static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
+    if (data.length == 0 || data.length > XLMaxMessagePayload) return 2;
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!text.length) return 3;
+    UIPasteboard.generalPasteboard.string = text;
+    return [sender sendPasteShortcut] ? 0 : 4;
+}
+
+static uint32_t XLHandleKeyEvent(XLHIDSender *sender, const NSData *data) {
+    if (data.length != sizeof(XLKeyEventPayload)) return 2;
+    XLKeyEventPayload payload = {};
+    [data getBytes:&payload length:sizeof(payload)];
+    return [sender sendKeyboardPage:ntohl(payload.page) usage:ntohl(payload.usage)] ? 0 : 4;
 }
 
 static int XLScreenIsOn(void) {
@@ -164,6 +181,18 @@ static void XLHandleControlClient(int client) {
                 }
                 case XLMessageSystemAction: {
                     uint32_t result = XLHandleSystemAction(sender, payload);
+                    if (result != 0) XLControlErrors.fetch_add(1);
+                    if (!XLWriteAck(client, sequence, result)) return;
+                    break;
+                }
+                case XLMessageTextInput: {
+                    uint32_t result = XLHandleTextInput(sender, payload);
+                    if (result != 0) XLControlErrors.fetch_add(1);
+                    if (!XLWriteAck(client, sequence, result)) return;
+                    break;
+                }
+                case XLMessageKeyEvent: {
+                    uint32_t result = XLHandleKeyEvent(sender, payload);
                     if (result != 0) XLControlErrors.fetch_add(1);
                     if (!XLWriteAck(client, sequence, result)) return;
                     break;

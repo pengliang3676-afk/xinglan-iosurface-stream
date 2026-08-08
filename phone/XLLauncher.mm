@@ -33,23 +33,6 @@ NSString *XLServicePath(const char *launcherArgument) {
             stringByAppendingPathComponent:@"xlstreamd"];
 }
 
-void XLConfigureRootPersona(posix_spawnattr_t *attributes) {
-    using SetPersona = int (*)(const posix_spawnattr_t *, uid_t, uint32_t);
-    using SetPersonaId = int (*)(const posix_spawnattr_t *, uid_t);
-
-    auto setPersona = reinterpret_cast<SetPersona>(
-        dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_np"));
-    auto setPersonaUid = reinterpret_cast<SetPersonaId>(
-        dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_uid_np"));
-    auto setPersonaGid = reinterpret_cast<SetPersonaId>(
-        dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_gid_np"));
-
-    if (setPersona && setPersonaUid && setPersonaGid) {
-        setPersona(attributes, 99, 1);
-        setPersonaUid(attributes, 0);
-        setPersonaGid(attributes, 0);
-    }
-}
 }  // namespace
 
 int main(int argc, char *argv[]) {
@@ -60,6 +43,11 @@ int main(int argc, char *argv[]) {
         signal(SIGHUP, XLHandleSignal);
 
         NSString *servicePath = XLServicePath(argv[0]);
+        NSLog(@"[XLStreamLauncher] launcher=%@ service=%@ uid=%d euid=%d",
+              [NSString stringWithUTF8String:argv[0] ?: ""],
+              servicePath,
+              getuid(),
+              geteuid());
         if (![[NSFileManager defaultManager] isExecutableFileAtPath:servicePath]) {
             NSLog(@"[XLStreamLauncher] service is missing: %@", servicePath);
             return 2;
@@ -68,8 +56,12 @@ int main(int argc, char *argv[]) {
         const char *service = servicePath.fileSystemRepresentation;
         while (!gStopRequested) {
             posix_spawnattr_t attributes;
-            posix_spawnattr_init(&attributes);
-            XLConfigureRootPersona(&attributes);
+            int attrResult = posix_spawnattr_init(&attributes);
+            if (attrResult != 0) {
+                NSLog(@"[XLStreamLauncher] spawn attributes init failed: %d", attrResult);
+                sleep(2);
+                continue;
+            }
 
             pid_t child = -1;
             char *const childArguments[] = {

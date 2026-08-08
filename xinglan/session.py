@@ -22,13 +22,16 @@ from .control_protocol import (  # noqa: E402
     DeviceStatus,
     MessageHeader,
     MessageType,
+    KeyCommand,
     SystemAction,
     TouchCommand,
     TouchPhase,
     pack_hello,
     pack_keyframe_request,
+    pack_key_event,
     pack_ping,
     pack_system_action,
+    pack_text_input,
     pack_touch,
     unpack_ack,
     unpack_device_status,
@@ -42,8 +45,8 @@ from .protocol import (  # noqa: E402
     parse_video_header_v3,
     parse_video_packet_header,
 )
+from .video_decoder import create_h264_decoder  # noqa: E402
 
-import av  # noqa: E402
 from pymobiledevice3.service_connection import ServiceConnection  # noqa: E402
 
 
@@ -98,6 +101,13 @@ class LatestFrame:
         with self._lock:
             return self._sequence, self._received_at, self._image
 
+    def clear(self) -> None:
+        """Release the retained PIL frame immediately when projection stops."""
+        with self._lock:
+            self._image = None
+            self._sequence += 1
+            self._received_at = 0.0
+
 
 def prepare_xlv3_image(image: Image.Image) -> Image.Image:
     """XLV3/IOSurface supplies an upright portrait frame."""
@@ -117,6 +127,9 @@ class SessionStats:
     battery_percent: float | None
     phone_dropped_frames: int
     phone_control_errors: int
+    decoder_backend: str
+    hardware_decode: bool
+    decode_errors: int
 
 
 @dataclass(frozen=True)
@@ -130,8 +143,9 @@ class DeviceSession:
     CONTROL_PORT = CONTROL_PORT
     STATUS_PORT = STATUS_PORT
 
-    def __init__(self, udid: str) -> None:
+    def __init__(self, udid: str, decoder_preference: str = "software") -> None:
         self.udid = udid
+        self.decoder_preference = decoder_preference
         self.latest = LatestFrame()
         self._lock = threading.Lock()
         self._status = "等待连接"
@@ -142,6 +156,9 @@ class DeviceSession:
         self._status_online = False
         self._status_received_at = 0.0
         self._device_status: DeviceStatus | None = None
+        self._decoder_backend = "等待"
+        self._hardware_decode = False
+        self._decode_errors = 0
         self._stop = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._control_queue: asyncio.Queue[ControlEnvelope] | None = None
@@ -158,6 +175,17 @@ class DeviceSession:
 
     def stop(self) -> None:
         self._stop.set()
+        self.latest.clear()
+        with self._lock:
+            self._status = "已断开投屏"
+            self._error = ""
+            self._fps = 0.0
+            self._control_online = False
+            self._status_online = False
+            self._status_received_at = 0.0
+            self._device_status = None
+            self._decoder_backend = "等待"
+            self._hardware_decode = False
         loop = self._loop
         if loop and loop.is_running():
             loop.call_soon_threadsafe(lambda: None)
@@ -179,6 +207,14 @@ class DeviceSession:
 
     def send_system_action(self, action: SystemAction) -> bool:
         return self._enqueue_control(ControlEnvelope("system", action))
+
+    def send_text(self, text: str) -> bool:
+        if not text or len(text.encode("utf-8")) > 1024 * 1024:
+            return False
+        return self._enqueue_control(ControlEnvelope("text", text))
+
+    def send_key(self, page: int, usage: int) -> bool:
+        return self._enqueue_control(ControlEnvelope("key", KeyCommand(page, usage)))
 
     def request_keyframe(self) -> bool:
         return self._enqueue_control(ControlEnvelope("keyframe"))
@@ -244,6 +280,9 @@ class DeviceSession:
                 battery_percent,
                 phone_status.dropped_frames if phone_status else 0,
                 phone_status.control_errors if phone_status else 0,
+                self._decoder_backend,
+                self._hardware_decode,
+                self._decode_errors,
             )
 
     def _set_state(self, status: str, error: str = "") -> None:
@@ -268,6 +307,16 @@ class DeviceSession:
             self._status_online = online
         if changed:
             LOGGER.info("device=%s status_online=%s", self.udid, online)
+
+    def _set_decoder_backend(self, name: str, hardware: bool) -> None:
+        with self._lock:
+            changed = name != self._decoder_backend or hardware != self._hardware_decode
+            self._decoder_backend = name
+            self._hardware_decode = hardware
+        if changed:
+            LOGGER.info(
+                "device=%s decoder=%s hardware=%s", self.udid, name, hardware
+            )
 
     def _publish_device_status(self, status: DeviceStatus) -> None:
         with self._lock:
@@ -358,9 +407,10 @@ class DeviceSession:
             raise ValueError(f"手机未运行星澜 XLV3 投屏服务：{magic!r}")
         header_bytes = magic + await read_exact(connection, VIDEO_HEADER_V3_SIZE - 4, 5.0)
         header = parse_video_header_v3(header_bytes)
-        decoder = av.CodecContext.create("h264", "r")
+        decoder = create_h264_decoder(self.decoder_preference)
+        self._set_decoder_backend(decoder.name, decoder.hardware)
         self._set_state(
-            f"投屏中 {header.width}×{header.height} · IOSurface · {self.VIDEO_PORT}"
+            f"投屏中 {header.width}×{header.height} · {decoder.name} · {self.VIDEO_PORT}"
         )
         frame_count = 0
         window_started = time.monotonic()
@@ -375,7 +425,22 @@ class DeviceSession:
             )
             if packet.packet_type != 1:
                 continue
-            decoded = decoder.decode(av.Packet(payload))
+            try:
+                decoded = decoder.decode(payload)
+            except Exception as exc:
+                with self._lock:
+                    self._decode_errors += 1
+                if decoder.hardware:
+                    LOGGER.warning(
+                        "device=%s hardware decode failed, falling back: %s",
+                        self.udid,
+                        exc,
+                    )
+                    decoder = create_h264_decoder("software")
+                    self._set_decoder_backend(decoder.name, decoder.hardware)
+                    self.request_keyframe()
+                    continue
+                raise
             for frame in decoded:
                 self.latest.publish(prepare_xlv3_image(frame.to_image()))
                 frame_count += 1
@@ -404,6 +469,10 @@ class DeviceSession:
             packet = pack_touch(envelope.value, sequence)
         elif envelope.kind == "system" and isinstance(envelope.value, SystemAction):
             packet = pack_system_action(envelope.value, sequence)
+        elif envelope.kind == "text" and isinstance(envelope.value, str):
+            packet = pack_text_input(envelope.value, sequence)
+        elif envelope.kind == "key" and isinstance(envelope.value, KeyCommand):
+            packet = pack_key_event(envelope.value, sequence)
         elif envelope.kind == "keyframe":
             packet = pack_keyframe_request(sequence)
         else:

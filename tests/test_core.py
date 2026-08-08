@@ -21,7 +21,7 @@ from xinglan.protocol import (
     touch_message,
 )
 from xinglan.diagnostics import ProcessLoadSampler, working_set_mb
-from xinglan.session import LatestFrame, prepare_xlv3_image
+from xinglan.session import DeviceSession, LatestFrame, prepare_xlv3_image
 
 
 class ProtocolTests(unittest.TestCase):
@@ -65,6 +65,15 @@ class ProtocolTests(unittest.TestCase):
         sequence, _, image = slot.snapshot()
         self.assertEqual(2, sequence)
         self.assertIs(second, image)
+
+    def test_stopping_idle_session_releases_latest_frame(self) -> None:
+        session = DeviceSession("test-device", decoder_preference="software")
+        session.latest.publish(Image.new("RGB", (360, 640), "blue"))
+        session.stop()
+        _, received_at, image = session.latest.snapshot()
+        self.assertIsNone(image)
+        self.assertEqual(0.0, received_at)
+        self.assertEqual("已断开投屏", session.stats().status)
 
     def test_xlv3_frame_orientation_is_unchanged(self) -> None:
         image = Image.new("RGB", (2, 3), "green")

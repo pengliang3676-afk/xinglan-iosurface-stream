@@ -17,6 +17,8 @@ enum XLMessageType : uint8_t {
     XLMessageTouch = 10,
     XLMessageSystemAction = 11,
     XLMessageRequestKeyframe = 12,
+    XLMessageTextInput = 13,
+    XLMessageKeyEvent = 14,
     XLMessagePing = 20,
     XLMessagePong = 21,
     XLMessageAck = 22,
@@ -47,6 +49,7 @@ enum XLCapability : uint32_t {
     XLCapabilityStatus = 1u << 3,
     XLCapabilityKeyframeRequest = 1u << 4,
     XLCapabilityFileTransfer = 1u << 5,
+    XLCapabilityTextInput = 1u << 6,
 };
 
 enum XLDeviceStatusFlag : uint16_t {
@@ -87,6 +90,11 @@ typedef struct {
     uint16_t action;
     uint16_t reserved;
 } XLSystemActionPayload;
+
+typedef struct {
+    uint32_t page;
+    uint32_t usage;
+} XLKeyEventPayload;
 
 typedef struct {
     uint64_t monotonicMs;
