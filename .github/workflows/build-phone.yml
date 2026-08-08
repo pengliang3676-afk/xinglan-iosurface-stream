@@ -25,12 +25,14 @@ jobs:
       - name: Collect package
         run: |
           mkdir -p output
-          find phone/packages -name '*.deb' -exec cp {} output/ \;
-          test -n "$(find output -name '*.deb' -print -quit)"
+          version="$(awk '/^Version:/{print $2}' phone/control)"
+          package="$(find phone/packages -name '*.deb' -print -quit)"
+          test -n "$package"
+          cp "$package" "output/XLStream-${version}.deb"
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: Xinglan-IOSurface-Stream-rootless
+          name: XLStream-rootless
           path: output/*.deb
           if-no-files-found: error

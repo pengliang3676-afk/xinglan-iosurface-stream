@@ -5,5 +5,5 @@ build/*.zip
 phone/.theos/
 phone/obj/
 phone/packages/
+dist/
 .DS_Store
-

@@ -1,5 +1,5 @@
-Package: com.jibeib.xinglanstream
-Name: Xinglan IOSurface Stream Service
+Package: com.jibeib.xlstream
+Name: 星澜投屏
 Depends: mobilesubstrate | ellekit, firmware (>= 15.0)
 Version: 0.1.0
 Architecture: iphoneos-arm64
@@ -7,4 +7,3 @@ Description: Clean-room IOSurface and VideoToolbox USB streaming service for own
 Maintainer: jibeib
 Author: jibeib
 Section: Tweaks
-
