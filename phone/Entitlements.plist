@@ -10,6 +10,9 @@
     <true/>
     <key>com.apple.private.security.no-sandbox</key>
     <true/>
+    <key>com.apple.private.hid.client.event-dispatch</key>
+    <true/>
+    <key>com.apple.private.hid.client.event-dispatch.internal</key>
+    <true/>
 </dict>
 </plist>
-

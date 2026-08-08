@@ -4,13 +4,11 @@ THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = XinglanStream
-XinglanStream_FILES = Entry.xm XLFrameSource.mm XLVideoServer.mm
-XinglanStream_CFLAGS = -fobjc-arc -std=c++17 -Wno-error -Wno-deprecated-declarations
-XinglanStream_FRAMEWORKS = Foundation UIKit IOSurface VideoToolbox CoreMedia CoreVideo QuartzCore
-XinglanStream_PRIVATE_FRAMEWORKS = IOKit
-XinglanStream_LIBRARIES = substrate
-XinglanStream_CODESIGN_FLAGS = -SEntitlements.plist
+TOOL_NAME = xlstreamd
+xlstreamd_FILES = main.mm XLFrameSource.mm XLVideoServer.mm XLControlServer.mm XLStatusServer.mm XLHIDSender.mm
+xlstreamd_CFLAGS = -fobjc-arc -std=c++17 -Wall -Wextra -Wno-error -Wno-deprecated-declarations
+xlstreamd_FRAMEWORKS = Foundation UIKit IOSurface VideoToolbox CoreMedia CoreVideo QuartzCore IOKit
+xlstreamd_CODESIGN_FLAGS = -SEntitlements.plist
+xlstreamd_INSTALL_PATH = /usr/libexec
 
-include $(THEOS_MAKE_PATH)/tweak.mk
-
+include $(THEOS_MAKE_PATH)/tool.mk

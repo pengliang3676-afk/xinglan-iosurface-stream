@@ -1,9 +1,9 @@
 Package: com.jibeib.xlstream
 Name: 星澜投屏
-Depends: mobilesubstrate | ellekit, firmware (>= 15.0)
-Version: 0.1.0
+Depends: firmware (>= 15.0)
+Version: 0.2.0
 Architecture: iphoneos-arm64
-Description: Clean-room IOSurface and VideoToolbox USB streaming service for owned devices.
+Description: Clean-room IOSurface, VideoToolbox and HID USB control daemon for owned devices.
 Maintainer: jibeib
 Author: jibeib
-Section: Tweaks
+Section: System

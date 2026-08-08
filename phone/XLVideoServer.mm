@@ -25,6 +25,10 @@ typedef struct {
     NSInteger slotIndex;
 } XLFrameToken;
 
+static std::atomic_bool XLForceKeyframe(false);
+static std::atomic_uint XLVideoClients(0);
+static std::atomic_uint XLDroppedFrames(0);
+
 static BOOL XLWriteAll(int socketHandle, const void *buffer, size_t length) {
     const uint8_t *bytes = (const uint8_t *)buffer;
     size_t offset = 0;
@@ -70,6 +74,7 @@ static void XLEncoderCallback(void *outputCallbackRefCon,
 
     if (!context || !context->connected.load() || status != noErr ||
         !sampleBuffer || !CMSampleBufferDataIsReady(sampleBuffer)) {
+        XLDroppedFrames.fetch_add(1);
         XLReleaseFrameToken(token);
         return;
     }
@@ -210,6 +215,7 @@ static void XLHandleVideoClient(int client) {
         }
 
         int64_t frameIndex = 0;
+        XLVideoClients.fetch_add(1);
         const useconds_t frameInterval = (useconds_t)(1000000 / XLVideoFPS);
         while (context.connected.load()) {
             @autoreleasepool {
@@ -222,7 +228,8 @@ static void XLHandleVideoClient(int client) {
                     token->slotIndex = slotIndex;
 
                     NSDictionary *options = nil;
-                    if ((frameIndex % (XLVideoFPS * 2)) == 0) {
+                    if ((frameIndex % (XLVideoFPS * 2)) == 0 ||
+                        XLForceKeyframe.exchange(false)) {
                         options = @{(__bridge NSString *)kVTEncodeFrameOptionKey_ForceKeyFrame : @YES};
                     }
                     OSStatus encodeStatus = VTCompressionSessionEncodeFrame(
@@ -234,9 +241,12 @@ static void XLHandleVideoClient(int client) {
                         token,
                         NULL);
                     if (encodeStatus != noErr) {
+                        XLDroppedFrames.fetch_add(1);
                         XLReleaseFrameToken(token);
                     }
                     frameIndex++;
+                } else {
+                    XLDroppedFrames.fetch_add(1);
                 }
 
                 mach_timebase_info_data_t timebase;
@@ -250,6 +260,7 @@ static void XLHandleVideoClient(int client) {
         VTCompressionSessionCompleteFrames(encoder, kCMTimeInvalid);
         VTCompressionSessionInvalidate(encoder);
         CFRelease(encoder);
+        XLVideoClients.fetch_sub(1);
         shutdown(client, SHUT_RDWR);
         close(client);
     }
@@ -283,8 +294,22 @@ void XLStartVideoServer(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
-            XLRunVideoServer();
+            while (true) {
+                XLRunVideoServer();
+                sleep(2);
+            }
         });
     });
 }
 
+void XLRequestVideoKeyframe(void) {
+    XLForceKeyframe.store(true);
+}
+
+uint32_t XLVideoClientCount(void) {
+    return XLVideoClients.load();
+}
+
+uint32_t XLVideoDroppedFrameCount(void) {
+    return XLDroppedFrames.load();
+}
