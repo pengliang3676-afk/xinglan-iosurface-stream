@@ -18,7 +18,7 @@ from xinglan.session import DeviceSession  # noqa: E402
 
 
 WALL_COLUMNS = 5
-WALL_TILE_SIZE = (160, 284)
+WALL_ROWS = 2
 MASTER_VIEW_SIZE = (360, 640)
 DISPLAY_INTERVAL_MS = 80
 LOGGER = logging.getLogger("xinglan.app")
@@ -43,18 +43,16 @@ class DeviceTile:
         self.last_move_at = 0
         self.dragging = False
         self.photo: ImageTk.PhotoImage | None = None
+        self.render_size = (0, 0)
         self.image_bounds = (0, 0, tile_width, tile_height)
 
         # 固定卡片外框。帧率/延迟文字每秒变化时，不允许Tk重新计算卡片宽度。
         self.frame = tk.Frame(
             parent,
-            width=tile_width + 14,
-            height=tile_height + 66,
             bg="#1d2939",
             highlightthickness=2,
             highlightbackground="#344054",
         )
-        self.frame.pack_propagate(False)
         self.title_row = tk.Frame(self.frame, bg="#1d2939")
         self.title_row.pack(fill="x", padx=5, pady=(4, 2))
         self.title = tk.Label(
@@ -84,7 +82,7 @@ class DeviceTile:
             self.frame, width=tile_width, height=tile_height, bg="black",
             highlightthickness=0, cursor="hand2"
         )
-        self.canvas.pack(padx=5)
+        self.canvas.pack(fill="both", expand=True, padx=4)
         self.image_item = self.canvas.create_image(0, 0, anchor="nw")
         self.status = tk.Label(
             self.frame, text="等待画面", bg="#1d2939", fg="#98a2b3",
@@ -97,7 +95,7 @@ class DeviceTile:
         self._show_placeholder("正在连接")
 
     def grid(self, row: int, column: int) -> None:
-        self.frame.grid(row=row, column=column, padx=5, pady=5, sticky="n")
+        self.frame.grid(row=row, column=column, padx=2, pady=2, sticky="nsew")
 
     def destroy(self) -> None:
         self.frame.destroy()
@@ -123,7 +121,8 @@ class DeviceTile:
             text=status_text,
             fg="#12b76a" if stats.status.startswith("投屏中") else "#f79009",
         )
-        if image is None or sequence == self.last_sequence:
+        canvas_size = (max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()))
+        if image is None or (sequence == self.last_sequence and canvas_size == self.render_size):
             return
         self.last_sequence = sequence
         self._show_image(image)
@@ -141,16 +140,19 @@ class DeviceTile:
         self.canvas.itemconfigure(self.image_item, image=self.photo)
 
     def _show_image(self, image: Image.Image) -> None:
-        scale = min(self.tile_width / image.width, self.tile_height / image.height)
+        canvas_width = max(1, self.canvas.winfo_width())
+        canvas_height = max(1, self.canvas.winfo_height())
+        self.render_size = (canvas_width, canvas_height)
+        scale = min(canvas_width / image.width, canvas_height / image.height)
         width = max(1, int(image.width * scale))
         height = max(1, int(image.height * scale))
         if image.size == (width, height):
             resized = image
         else:
             resized = image.resize((width, height), Image.Resampling.LANCZOS)
-        surface = Image.new("RGB", (self.tile_width, self.tile_height), "black")
-        x = (self.tile_width - width) // 2
-        y = (self.tile_height - height) // 2
+        surface = Image.new("RGB", (canvas_width, canvas_height), "black")
+        x = (canvas_width - width) // 2
+        y = (canvas_height - height) // 2
         surface.paste(resized, (x, y))
         self.image_bounds = (x, y, x + width, y + height)
         self.photo = ImageTk.PhotoImage(surface)
@@ -189,6 +191,37 @@ class DeviceTile:
             self.owner.route_touch(self.session, 0, *point)
 
 
+class EmptySlot:
+    def __init__(self, parent: tk.Widget, index: int) -> None:
+        self.frame = tk.Frame(
+            parent,
+            bg="#050a11",
+            highlightthickness=1,
+            highlightbackground="#344054",
+        )
+        tk.Label(
+            self.frame,
+            text=f"位置 {index + 1:02d}",
+            bg="#111827",
+            fg="#667085",
+            anchor="w",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(fill="x", padx=4, pady=(3, 2))
+        tk.Label(
+            self.frame,
+            text="未连接",
+            bg="#050a11",
+            fg="#667085",
+            font=("Microsoft YaHei UI", 10),
+        ).pack(fill="both", expand=True)
+
+    def grid(self, row: int, column: int) -> None:
+        self.frame.grid(row=row, column=column, padx=2, pady=2, sticky="nsew")
+
+    def destroy(self) -> None:
+        self.frame.destroy()
+
+
 class MasterView:
     def __init__(self, owner: "XinglanApp", parent: tk.Widget) -> None:
         self.owner = owner
@@ -203,6 +236,7 @@ class MasterView:
         self.frame = tk.Frame(
             parent,
             width=width + 12,
+            height=height + 76,
             bg="#101828",
             highlightthickness=2,
             highlightbackground="#d58b00",
@@ -337,6 +371,7 @@ class XinglanApp:
         self.max_devices = max_devices
         self.sessions: dict[str, DeviceSession] = {}
         self.tiles: dict[str, DeviceTile] = {}
+        self.empty_slots: list[EmptySlot] = []
         self.missing_scans: dict[str, int] = {}
         self.master_udid: str | None = None
         self.sync_enabled = tk.BooleanVar(value=False)
@@ -374,15 +409,19 @@ class XinglanApp:
         self.right_panel.pack(side="right", fill="y", padx=(7, 0))
         self.right_panel.pack_propagate(False)
         self.master_view = MasterView(self, self.right_panel)
-        self.master_view.frame.pack(fill="y")
+        self.master_view.frame.pack(fill="both", expand=True)
         self.left_panel = tk.Frame(self.shell, bg="#0b1220")
         self.left_panel.pack(side="left", fill="both", expand=True)
         self.wall = tk.Frame(self.left_panel, bg="#0b1220")
         self.wall.pack(fill="both", expand=True)
         for column in range(WALL_COLUMNS):
             self.wall.grid_columnconfigure(column, weight=1)
+        for row in range(WALL_ROWS):
+            self.wall.grid_rowconfigure(row, weight=1)
 
         self.scan_devices()
+        if not self.tiles and not self.empty_slots:
+            self._rebuild_tiles()
         root.after(DISPLAY_INTERVAL_MS, self.refresh_tiles)
         root.after(1000, self.refresh_health)
         root.after(2000, self.periodic_scan)
@@ -432,7 +471,10 @@ class XinglanApp:
         for tile in self.tiles.values():
             tile.destroy()
         self.tiles.clear()
-        tile_width, tile_height = WALL_TILE_SIZE
+        for slot in self.empty_slots:
+            slot.destroy()
+        self.empty_slots.clear()
+        tile_width, tile_height = 160, 284
         for index, udid in enumerate(ordered):
             tile = DeviceTile(
                 self,
@@ -444,6 +486,12 @@ class XinglanApp:
             )
             tile.grid(index // WALL_COLUMNS, index % WALL_COLUMNS)
             self.tiles[udid] = tile
+
+        visible_slots = min(self.max_devices, WALL_COLUMNS * WALL_ROWS)
+        for index in range(len(ordered), visible_slots):
+            slot = EmptySlot(self.wall, index)
+            slot.grid(index // WALL_COLUMNS, index % WALL_COLUMNS)
+            self.empty_slots.append(slot)
 
         if self.master_udid not in self.sessions:
             self.master_udid = ordered[0] if ordered else None
