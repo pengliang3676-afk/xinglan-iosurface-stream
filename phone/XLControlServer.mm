@@ -95,7 +95,7 @@ static uint32_t XLHandleTouch(XLHIDSender *sender, const NSData *data) {
 
 static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
     if (data.length == 0 || data.length > XLMaxMessagePayload) return 2;
-    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSString *text = [[NSString alloc] initWithData:(NSData *)data encoding:NSUTF8StringEncoding];
     if (!text.length) return 3;
     UIPasteboard.generalPasteboard.string = text;
     return [sender sendPasteShortcut] ? 0 : 4;
