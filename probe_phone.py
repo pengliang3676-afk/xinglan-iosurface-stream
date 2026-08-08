@@ -4,6 +4,8 @@ import asyncio
 import sys
 
 from xinglan.bootstrap import configure_dependencies
+from xinglan.control_protocol import CONTROL_PORT, STATUS_PORT
+from xinglan.session import DeviceSession
 
 configure_dependencies()
 
@@ -31,15 +33,14 @@ async def probe(udid: str, port: int) -> tuple[int, str]:
 async def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("usage: probe_phone.py <UDID>")
-    results = await asyncio.gather(*(probe(sys.argv[1], port) for port in (6000, 6002, 6202)))
+    names = {
+        DeviceSession.VIDEO_PORT: "IOSurface H.264 视频",
+        CONTROL_PORT: "二进制控制",
+        STATUS_PORT: "状态/心跳",
+    }
+    results = await asyncio.gather(*(probe(sys.argv[1], port) for port in names))
     for port, status in results:
-        if port == 6000:
-            name = "触摸"
-        elif port == 6202:
-            name = "新IOSurface视频"
-        else:
-            name = "旧H.264视频"
-        print(f"{port} {name}：{status}")
+        print(f"{port} {names[port]}：{status}")
 
 
 if __name__ == "__main__":

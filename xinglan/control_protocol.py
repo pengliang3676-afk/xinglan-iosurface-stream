@@ -80,6 +80,20 @@ class DeviceStatus:
     control_errors: int
 
 
+@dataclass(frozen=True)
+class Hello:
+    capabilities: int
+    screen_width: int
+    screen_height: int
+    protocol_version: int
+
+
+@dataclass(frozen=True)
+class Acknowledgement:
+    acknowledged_sequence: int
+    result_code: int
+
+
 def pack_header(
     magic: bytes,
     message_type: MessageType,
@@ -130,6 +144,32 @@ def pack_message(
     return pack_header(magic, message_type, len(payload), sequence, flags) + payload
 
 
+def pack_hello(
+    magic: bytes,
+    sequence: int,
+    capabilities: int = 0,
+    screen_width: int = 0,
+    screen_height: int = 0,
+) -> bytes:
+    payload = HELLO.pack(
+        capabilities & 0xFFFFFFFF,
+        screen_width & 0xFFFF,
+        screen_height & 0xFFFF,
+        PROTOCOL_VERSION,
+        0,
+    )
+    return pack_message(magic, MessageType.HELLO, sequence, payload)
+
+
+def unpack_hello(payload: bytes) -> Hello:
+    if len(payload) != HELLO.size:
+        raise ValueError(f"invalid hello payload length: {len(payload)}")
+    capabilities, width, height, version, _ = HELLO.unpack(payload)
+    if version != PROTOCOL_VERSION:
+        raise ValueError(f"unsupported peer protocol version: {version}")
+    return Hello(capabilities, width, height, version)
+
+
 def _unit_to_u16(value: float) -> int:
     return round(max(0.0, min(1.0, value)) * 65535.0)
 
@@ -144,6 +184,19 @@ def pack_touch(command: TouchCommand, sequence: int) -> bytes:
         command.timestamp_ms & 0xFFFFFFFF,
     )
     return pack_message(CONTROL_MAGIC, MessageType.TOUCH, sequence, payload)
+
+
+def pack_system_action(action: SystemAction, sequence: int) -> bytes:
+    return pack_message(
+        CONTROL_MAGIC,
+        MessageType.SYSTEM_ACTION,
+        sequence,
+        SYSTEM_ACTION.pack(int(action), 0),
+    )
+
+
+def pack_keyframe_request(sequence: int) -> bytes:
+    return pack_message(CONTROL_MAGIC, MessageType.REQUEST_KEYFRAME, sequence)
 
 
 def unpack_touch(payload: bytes) -> TouchCommand:
@@ -163,6 +216,13 @@ def unpack_touch(payload: bytes) -> TouchCommand:
 def pack_ping(magic: bytes, sequence: int, monotonic_ms: int, pong: bool = False) -> bytes:
     message_type = MessageType.PONG if pong else MessageType.PING
     return pack_message(magic, message_type, sequence, PING.pack(monotonic_ms & 0xFFFFFFFFFFFFFFFF))
+
+
+def unpack_ack(payload: bytes) -> Acknowledgement:
+    if len(payload) != ACK.size:
+        raise ValueError(f"invalid acknowledgement length: {len(payload)}")
+    acknowledged_sequence, result_code = ACK.unpack(payload)
+    return Acknowledgement(acknowledged_sequence, result_code)
 
 
 def unpack_device_status(payload: bytes) -> DeviceStatus:

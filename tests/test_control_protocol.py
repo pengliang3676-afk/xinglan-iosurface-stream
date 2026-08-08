@@ -8,14 +8,24 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
 from xinglan.control_protocol import (
+    ACK,
     CONTROL_MAGIC,
     HEADER,
+    HELLO,
+    PROTOCOL_VERSION,
     MessageType,
+    SystemAction,
     TouchCommand,
     TouchPhase,
+    pack_hello,
     pack_header,
+    pack_keyframe_request,
+    pack_message,
+    pack_system_action,
     pack_touch,
+    unpack_ack,
     unpack_header,
+    unpack_hello,
     unpack_touch,
 )
 
@@ -50,6 +60,30 @@ class ControlProtocolTests(unittest.TestCase):
     def test_rejects_oversized_payload(self) -> None:
         with self.assertRaises(ValueError):
             pack_header(CONTROL_MAGIC, MessageType.PING, 1024 * 1024 + 1, 1)
+
+    def test_hello_round_trip(self) -> None:
+        packet = pack_hello(CONTROL_MAGIC, 3, capabilities=31, screen_width=360, screen_height=640)
+        header = unpack_header(packet[:HEADER.size], CONTROL_MAGIC)
+        hello = unpack_hello(packet[HEADER.size:])
+        self.assertEqual((MessageType.HELLO, HELLO.size), (header.message_type, header.payload_length))
+        self.assertEqual((31, 360, 640, PROTOCOL_VERSION), (
+            hello.capabilities, hello.screen_width, hello.screen_height, hello.protocol_version
+        ))
+
+    def test_control_commands_have_sequences(self) -> None:
+        home = pack_system_action(SystemAction.HOME, 41)
+        keyframe = pack_keyframe_request(42)
+        self.assertEqual(MessageType.SYSTEM_ACTION, unpack_header(home[:HEADER.size]).message_type)
+        self.assertEqual(41, unpack_header(home[:HEADER.size]).sequence)
+        self.assertEqual(MessageType.REQUEST_KEYFRAME, unpack_header(keyframe[:HEADER.size]).message_type)
+        self.assertEqual(42, unpack_header(keyframe[:HEADER.size]).sequence)
+
+    def test_ack_round_trip(self) -> None:
+        packet = pack_message(CONTROL_MAGIC, MessageType.ACK, 8, ACK.pack(7, 0))
+        acknowledgement = unpack_ack(packet[HEADER.size:])
+        self.assertEqual((7, 0), (
+            acknowledgement.acknowledged_sequence, acknowledgement.result_code
+        ))
 
 
 if __name__ == "__main__":
