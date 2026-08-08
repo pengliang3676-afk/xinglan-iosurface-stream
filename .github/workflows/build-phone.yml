@@ -1,0 +1,36 @@
+name: build-xinglan-iosurface-stream
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          brew install ldid xz
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+
+      - name: Build rootless package
+        env:
+          THEOS: ${{ runner.temp }}/theos-link
+        run: |
+          ln -s "$HOME/theos" "$THEOS"
+          make -C phone clean package FINALPACKAGE=1
+
+      - name: Collect package
+        run: |
+          mkdir -p output
+          find phone/packages -name '*.deb' -exec cp {} output/ \;
+          test -n "$(find output -name '*.deb' -print -quit)"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xinglan-IOSurface-Stream-rootless
+          path: output/*.deb
+          if-no-files-found: error
