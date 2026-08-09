@@ -288,7 +288,7 @@ class DeviceTile:
         point = self._normalized(event)
         if point is None:
             return
-        self.owner.activate_keyboard_capture()
+        self.owner.activate_keyboard_capture(event.x_root, event.y_root)
         self.dragging = True
         self.owner.route_touch(self.session, 1, *point, from_master=False)
 
@@ -524,7 +524,7 @@ class MasterView:
         point = self._normalized(event)
         if point is None:
             return
-        self.owner.activate_keyboard_capture()
+        self.owner.activate_keyboard_capture(event.x_root, event.y_root)
         self.dragging = True
         self.owner.route_touch(self.session, 1, *point, from_master=True)
 
@@ -800,8 +800,18 @@ class XinglanApp:
             font=("Microsoft YaHei UI", 10),
         ).pack(side="left", fill="both", expand=True, padx=(4, 0))
 
-    def activate_keyboard_capture(self) -> None:
-        """Route subsequent Windows keyboard/IME input to the phone canvas."""
+    def activate_keyboard_capture(
+        self,
+        screen_x: int | None = None,
+        screen_y: int | None = None,
+    ) -> None:
+        """Route keyboard input and anchor the IME candidate by the click."""
+        if screen_x is not None and screen_y is not None:
+            local_x = max(1, min(self.root.winfo_width() - 2,
+                                 screen_x - self.root.winfo_rootx()))
+            local_y = max(1, min(self.root.winfo_height() - 2,
+                                 screen_y - self.root.winfo_rooty()))
+            self.keyboard_capture.place(x=local_x, y=local_y, width=1, height=1)
         self.root.after_idle(self.keyboard_capture.focus_set)
 
     def _keyboard_buffer_changed(self, *_args) -> None:
