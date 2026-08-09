@@ -1,22 +1,4 @@
 #!/bin/sh
-set -e
-
-run_bounded() {
-    limit="$1"
-    shift
-    "$@" >/dev/null 2>&1 &
-    command_pid=$!
-    (
-        sleep "$limit"
-        kill -TERM "$command_pid" >/dev/null 2>&1 || true
-    ) &
-    watchdog_pid=$!
-    status=0
-    wait "$command_pid" || status=$?
-    kill "$watchdog_pid" >/dev/null 2>&1 || true
-    wait "$watchdog_pid" >/dev/null 2>&1 || true
-    return "$status"
-}
 
 if [ -x /Applications/XLStream.app/XLStreamLauncher ]; then
     PREFIX=""
@@ -27,11 +9,14 @@ PLIST="${PREFIX}/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
 APP="${PREFIX}/Applications/XLStream.app"
 chown -R root:wheel "$APP" >/dev/null 2>&1 || true
 chmod 755 "$APP" "$APP/XLStreamLauncher" "$APP/bin" "$APP/bin/xlstreamd" >/dev/null 2>&1 || true
-# Run launchctl synchronously so rootless Sileo cannot reap the service-start
-# helper, but cap every operation so a broken launchd state cannot hang dpkg.
-run_bounded 3 launchctl bootout system/com.jibeib.xlstreamd || true
-killall XLStreamLauncher >/dev/null 2>&1 || true
-killall xlstreamd >/dev/null 2>&1 || true
-run_bounded 5 launchctl bootstrap system "$PLIST" || \
-    run_bounded 5 launchctl load "$PLIST" || true
+# Never make dpkg/Sileo wait for launchd.  All descriptors are detached so a
+# broken launchd state cannot keep the package transaction open.
+(
+    launchctl bootout system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
+    killall XLStreamLauncher >/dev/null 2>&1 || true
+    killall xlstreamd >/dev/null 2>&1 || true
+    sleep 1
+    launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || \
+        launchctl load "$PLIST" >/dev/null 2>&1 || true
+) </dev/null >/dev/null 2>&1 &
 exit 0

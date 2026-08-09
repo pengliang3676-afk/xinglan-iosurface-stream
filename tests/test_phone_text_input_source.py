@@ -37,9 +37,17 @@ class PhoneTextInputSourceTests(unittest.TestCase):
         info = (ROOT / "phone" / "layout" / "Applications" / "XLStream.app" / "Info.plist").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Version: 0.5.0", control)
-        self.assertIn("<string>0.5.0</string>", info)
-        self.assertIn("<string>50</string>", info)
+        self.assertIn("Version: 0.5.1", control)
+        self.assertIn("<string>0.5.1</string>", info)
+        self.assertIn("<string>51</string>", info)
+
+    def test_package_scripts_never_wait_for_launchctl(self):
+        scripts = ROOT / "phone" / "layout" / "DEBIAN"
+        for name in ("postinst", "prerm"):
+            source = (scripts / name).read_text(encoding="utf-8")
+            self.assertNotIn("run_bounded", source)
+            self.assertNotRegex(source, r"(?m)^\s*wait\b")
+            self.assertIn("</dev/null >/dev/null 2>&1 &", source)
 
 
 if __name__ == "__main__":
