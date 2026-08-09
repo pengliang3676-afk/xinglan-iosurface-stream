@@ -2,6 +2,12 @@ name: build-xinglan-iosurface-stream
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "phone/**"
+      - ".github/workflows/build-phone.yml"
 
 jobs:
   build:
