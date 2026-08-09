@@ -8,11 +8,15 @@ else
 fi
 PLIST="${PREFIX}/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
 APP="${PREFIX}/Applications/XLStream.app"
-launchctl bootout system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
-killall XLStreamLauncher >/dev/null 2>&1 || true
-killall xlstreamd >/dev/null 2>&1 || true
 chown -R root:wheel "$APP" >/dev/null 2>&1 || true
 chmod 755 "$APP" "$APP/XLStreamLauncher" "$APP/bin" "$APP/bin/xlstreamd" >/dev/null 2>&1 || true
-launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || launchctl load "$PLIST" >/dev/null 2>&1 || true
-launchctl kickstart -k system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
+# Dopamine's launchctl may block while dpkg/Sileo is configuring a package.
+# Restart the service after dpkg exits so installation never hangs at Configuring.
+(
+    launchctl bootout system/com.jibeib.xlstreamd || true
+    killall XLStreamLauncher || true
+    killall xlstreamd || true
+    sleep 1
+    launchctl bootstrap system "$PLIST" || launchctl load "$PLIST" || true
+) </dev/null >/dev/null 2>&1 &
 exit 0

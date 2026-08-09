@@ -6,8 +6,10 @@ else
     PREFIX="/var/jb"
 fi
 PLIST="${PREFIX}/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
-launchctl bootout system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
-launchctl unload "$PLIST" >/dev/null 2>&1 || true
-killall XLStreamLauncher >/dev/null 2>&1 || true
-killall xlstreamd >/dev/null 2>&1 || true
+(
+    launchctl bootout system/com.jibeib.xlstreamd || true
+    launchctl unload "$PLIST" || true
+    killall XLStreamLauncher || true
+    killall xlstreamd || true
+) </dev/null >/dev/null 2>&1 &
 exit 0
