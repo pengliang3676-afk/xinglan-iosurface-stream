@@ -16,11 +16,15 @@
 @end
 
 @interface XLTextInputReceiver : NSObject
+@property (nonatomic, strong) NSMutableData *pasteBuffer;
 @end
 
 static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
 static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
 static const char *XLTextInsertNotification = "com.jibeib.xlstream.text.insert";
+static const char *XLTextPasteBeginNotification = "com.jibeib.xlstream.text.paste.begin";
+static const char *XLTextPasteChunkNotification = "com.jibeib.xlstream.text.paste.chunk";
+static const char *XLTextPasteCommitNotification = "com.jibeib.xlstream.text.paste.commit";
 static CFStringRef const XLTextDeleteNotification = CFSTR("com.jibeib.xlstream.text.delete");
 static CFStringRef const XLTextReturnNotification = CFSTR("com.jibeib.xlstream.text.return");
 
@@ -78,6 +82,18 @@ static BOOL XLDeleteFromFocusedControl(void) {
                                                      to:nil
                                                    from:nil
                                                forEvent:nil];
+}
+
+static BOOL XLPasteIntoFocusedControl(void) {
+    UIApplication *application = UIApplication.sharedApplication;
+    if (application.applicationState != UIApplicationStateActive) return NO;
+    UIResponder *responder = XLCurrentFirstResponder();
+    SEL selector = @selector(paste:);
+    if (responder && [responder respondsToSelector:selector]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(responder, selector, nil);
+        return YES;
+    }
+    return [application sendAction:selector to:nil from:nil forEvent:nil];
 }
 
 static id XLShared(Class cls) {
@@ -165,6 +181,56 @@ static void XLTextInputNotification(
         if (text.length) {
             XLInsertTextIntoFocusedControl(text);
         }
+    });
+    static int pasteBeginToken = 0;
+    static int pasteChunkToken = 0;
+    static int pasteCommitToken = 0;
+    __weak XLTextInputReceiver *weakSelf = self;
+    notify_register_dispatch(XLTextPasteBeginNotification, &pasteBeginToken,
+                             dispatch_get_main_queue(), ^(int token) {
+        (void)token;
+        XLTextInputReceiver *receiver = weakSelf;
+        if (UIApplication.sharedApplication.applicationState == UIApplicationStateActive) {
+            receiver.pasteBuffer = [NSMutableData data];
+        } else {
+            receiver.pasteBuffer = nil;
+        }
+    });
+    notify_register_dispatch(XLTextPasteChunkNotification, &pasteChunkToken,
+                             dispatch_get_main_queue(), ^(int token) {
+        XLTextInputReceiver *receiver = weakSelf;
+        if (!receiver.pasteBuffer) return;
+        uint64_t state = 0;
+        if (notify_get_state(token, &state) != NOTIFY_STATUS_OK) return;
+        NSUInteger length = (NSUInteger)((state >> 56) & 0xFF);
+        if (length == 0 || length > 7) {
+            receiver.pasteBuffer = nil;
+            return;
+        }
+        uint8_t bytes[7] = {};
+        for (NSUInteger index = 0; index < length; index++) {
+            bytes[index] = (uint8_t)((state >> (index * 8)) & 0xFF);
+        }
+        [receiver.pasteBuffer appendBytes:bytes length:length];
+    });
+    notify_register_dispatch(XLTextPasteCommitNotification, &pasteCommitToken,
+                             dispatch_get_main_queue(), ^(int token) {
+        (void)token;
+        XLTextInputReceiver *receiver = weakSelf;
+        NSData *payload = [receiver.pasteBuffer copy];
+        receiver.pasteBuffer = nil;
+        if (!payload.length ||
+            UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
+        NSString *text = [[NSString alloc] initWithData:payload
+                                               encoding:NSUTF8StringEncoding];
+        if (!text.length) return;
+        UIPasteboard.generalPasteboard.string = text;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50000000),
+                       dispatch_get_main_queue(), ^{
+            if (!XLPasteIntoFocusedControl()) {
+                XLInsertTextIntoFocusedControl(text);
+            }
+        });
     });
     return self;
 }

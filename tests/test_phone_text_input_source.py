@@ -6,15 +6,23 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PhoneTextInputSourceTests(unittest.TestCase):
-    def test_text_input_prefers_real_system_paste(self):
+    def test_text_input_prefers_foreground_app_paste(self):
         source = (ROOT / "phone" / "XLControlServer.mm").read_text(encoding="utf-8")
         handler = source[source.index("static uint32_t XLHandleTextInput") :]
-        self.assertIn("XLWriteSystemPasteboard(text)", handler)
-        self.assertIn("sendPasteShortcut", handler)
+        self.assertIn("XLPostPasteText(text)", handler)
+        self.assertIn("XLPostTextScalars(text)", handler)
         self.assertLess(
-            handler.index("sendPasteShortcut"),
+            handler.index("XLPostPasteText(text)"),
             handler.index("XLPostTextScalars(text)"),
         )
+
+    def test_foreground_tweak_reassembles_and_pastes_complete_text(self):
+        source = (ROOT / "phone" / "XLSystemActions.xm").read_text(encoding="utf-8")
+        self.assertIn("XLTextPasteBeginNotification", source)
+        self.assertIn("XLTextPasteChunkNotification", source)
+        self.assertIn("XLTextPasteCommitNotification", source)
+        self.assertIn("UIPasteboard.generalPasteboard.string = text", source)
+        self.assertIn("XLPasteIntoFocusedControl()", source)
 
     def test_paste_shortcut_has_modifier_timing(self):
         source = (ROOT / "phone" / "XLHIDSender.mm").read_text(encoding="utf-8")
@@ -29,9 +37,9 @@ class PhoneTextInputSourceTests(unittest.TestCase):
         info = (ROOT / "phone" / "layout" / "Applications" / "XLStream.app" / "Info.plist").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Version: 0.4.9", control)
-        self.assertIn("<string>0.4.9</string>", info)
-        self.assertIn("<string>49</string>", info)
+        self.assertIn("Version: 0.5.0", control)
+        self.assertIn("<string>0.5.0</string>", info)
+        self.assertIn("<string>50</string>", info)
 
 
 if __name__ == "__main__":
