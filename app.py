@@ -15,7 +15,7 @@ configure_dependencies()
 
 from PIL import Image, ImageDraw, ImageTk  # noqa: E402
 
-from xinglan.device_discovery import discover_usb_udids  # noqa: E402
+from xinglan.device_discovery import discover_usb_udids_stable  # noqa: E402
 from xinglan.device_actions import (  # noqa: E402
     identify_physical_device,
     PersistentDeviceActionHub,
@@ -1546,7 +1546,7 @@ class XinglanApp:
 
     def scan_devices(self) -> None:
         try:
-            udids = discover_usb_udids(PROJECT_DIR)[: self.max_devices]
+            udids = discover_usb_udids_stable(PROJECT_DIR)[: self.max_devices]
         except Exception as exc:
             self.summary.set(f"USB扫描失败：{exc}")
             LOGGER.warning("USB scan failed: %s", exc)
@@ -1582,15 +1582,21 @@ class XinglanApp:
         # Prepare lightweight control-only channels for every connected phone.
         # This does not start projection or decoding; it only restores the
         # legacy instant all-wake/all-sleep behavior.
-        self.action_hub.update_devices(udids)
+        stable_udids = sorted(self.sessions)
+        self.action_hub.update_devices(stable_udids)
 
         if changed:
             self._refresh_group_selector()
             self._rebuild_tiles()
-        retained = len(self.sessions) - len(udids)
-        retained_text = f" · 短暂失联保留 {retained} 台" if retained > 0 else ""
+        retained = len(stable_udids) - len(udids)
+        if retained > 0:
+            missing_suffixes = sorted(udid[-8:] for udid in set(stable_udids) - current)
+            LOGGER.warning(
+                "transient USB scan omission raw=%s stable=%s retained=%s devices=%s",
+                len(udids), len(stable_udids), retained, ",".join(missing_suffixes),
+            )
         self.summary.set(
-            f"发现 {len(udids)} 台USB手机{retained_text} · 已投屏 {len(self.active_udids)} 台 · 默认不自动投屏"
+            f"发现 {len(stable_udids)} 台USB手机 · 已投屏 {len(self.active_udids)} 台 · 默认不自动投屏"
         )
 
     def _rebuild_tiles(self) -> None:
