@@ -162,6 +162,7 @@ class DeviceSession:
         self._stop = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._control_queue: asyncio.Queue[ControlEnvelope] | None = None
+        self._decoder_reset = threading.Event()
         self._sequence = 0
         self._thread = threading.Thread(
             target=self._thread_main,
@@ -218,6 +219,11 @@ class DeviceSession:
 
     def request_keyframe(self) -> bool:
         return self._enqueue_control(ControlEnvelope("keyframe"))
+
+    def request_decoder_reset(self) -> None:
+        """Recycle FFmpeg on the next keyframe without reconnecting USB video."""
+        self._decoder_reset.set()
+        self.request_keyframe()
 
     def _enqueue_control(self, envelope: ControlEnvelope) -> bool:
         loop = self._loop
@@ -408,49 +414,64 @@ class DeviceSession:
         header_bytes = magic + await read_exact(connection, VIDEO_HEADER_V3_SIZE - 4, 5.0)
         header = parse_video_header_v3(header_bytes)
         decoder = create_h264_decoder(self.decoder_preference)
-        self._set_decoder_backend(decoder.name, decoder.hardware)
-        self._set_state(
-            f"投屏中 {header.width}×{header.height} · {decoder.name} · {self.VIDEO_PORT}"
-        )
-        frame_count = 0
-        window_started = time.monotonic()
-        while not self._stop.is_set():
-            packet = parse_video_packet_header(
-                await read_exact(connection, VIDEO_PACKET_HEADER_SIZE, 3.5)
+        try:
+            self._set_decoder_backend(decoder.name, decoder.hardware)
+            self._set_state(
+                f"投屏中 {header.width}×{header.height} · {decoder.name} · {self.VIDEO_PORT}"
             )
-            payload = (
-                await read_exact(connection, packet.payload_length, 3.5)
-                if packet.payload_length
-                else b""
-            )
-            if packet.packet_type != 1:
-                continue
-            try:
-                decoded = decoder.decode(payload)
-            except Exception as exc:
-                with self._lock:
-                    self._decode_errors += 1
-                if decoder.hardware:
-                    LOGGER.warning(
-                        "device=%s hardware decode failed, falling back: %s",
-                        self.udid,
-                        exc,
-                    )
-                    decoder = create_h264_decoder("software")
-                    self._set_decoder_backend(decoder.name, decoder.hardware)
-                    self.request_keyframe()
+            frame_count = 0
+            window_started = time.monotonic()
+            while not self._stop.is_set():
+                packet = parse_video_packet_header(
+                    await read_exact(connection, VIDEO_PACKET_HEADER_SIZE, 3.5)
+                )
+                payload = (
+                    await read_exact(connection, packet.payload_length, 3.5)
+                    if packet.payload_length
+                    else b""
+                )
+                if packet.packet_type != 1:
                     continue
-                raise
-            for frame in decoded:
-                self.latest.publish(prepare_xlv3_image(frame.to_image()))
-                frame_count += 1
-            now = time.monotonic()
-            elapsed = now - window_started
-            if elapsed >= 2.0:
-                with self._lock:
-                    self._fps = frame_count / elapsed
-                frame_count = 0
-                window_started = now
+                if self._decoder_reset.is_set():
+                    # A fresh decoder must start from an IDR frame.  Skip delta
+                    # frames until the phone answers the keyframe request.
+                    if not (packet.flags & 0x01):
+                        continue
+                    decoder.close()
+                    decoder = create_h264_decoder(self.decoder_preference)
+                    self._set_decoder_backend(decoder.name, decoder.hardware)
+                    self._decoder_reset.clear()
+                    LOGGER.info("device=%s decoder context recycled", self.udid)
+                try:
+                    decoded = decoder.decode(payload)
+                except Exception as exc:
+                    with self._lock:
+                        self._decode_errors += 1
+                    if decoder.hardware:
+                        LOGGER.warning(
+                            "device=%s hardware decode failed, falling back: %s",
+                            self.udid,
+                            exc,
+                        )
+                        decoder.close()
+                        decoder = create_h264_decoder("software")
+                        self._set_decoder_backend(decoder.name, decoder.hardware)
+                        self.request_keyframe()
+                        continue
+                    raise
+                for frame in decoded:
+                    self.latest.publish(prepare_xlv3_image(frame.to_image()))
+                    frame_count += 1
+                now = time.monotonic()
+                elapsed = now - window_started
+                if elapsed >= 2.0:
+                    with self._lock:
+                        self._fps = frame_count / elapsed
+                    frame_count = 0
+                    window_started = now
+        finally:
+            decoder.close()
+            self._decoder_reset.clear()
 
     async def _control_handshake(self, connection: Any) -> None:
         sequence = self._next_sequence()

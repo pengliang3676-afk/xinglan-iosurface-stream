@@ -20,14 +20,27 @@ WINDOWS_NO_DIALOG_FLAGS = 0x0001 | 0x0002 | 0x8000
 
 @dataclass
 class H264Decoder:
-    context: Any
+    context: Any | None
     name: str
     hardware: bool
 
     def decode(self, payload: bytes) -> list[Any]:
         import av
 
+        if self.context is None:
+            return []
         return self.context.decode(av.Packet(payload))
+
+    def close(self) -> None:
+        """Release the FFmpeg codec context and its native worker resources."""
+        context = self.context
+        self.context = None
+        if context is None:
+            return
+        try:
+            context.flush_buffers()
+        except Exception:
+            pass
 
 
 def create_h264_decoder(preference: str = "software") -> H264Decoder:

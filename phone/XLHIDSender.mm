@@ -217,7 +217,12 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
 
 - (BOOL)sendPasteShortcut {
     if (![self sendKeyboardPage:0x07 usage:0xE3 down:YES]) return NO;
+    // Give iOS time to establish the Command modifier before sending V. Some
+    // third-party editors miss the shortcut when all three events are emitted
+    // back-to-back.
+    usleep(45000);
     BOOL pasted = [self sendKeyboardPage:0x07 usage:0x19];
+    usleep(45000);
     BOOL released = [self sendKeyboardPage:0x07 usage:0xE3 down:NO];
     return pasted && released;
 }

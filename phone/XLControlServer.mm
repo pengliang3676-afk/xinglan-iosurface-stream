@@ -144,11 +144,41 @@ static BOOL XLPostTextScalars(NSString *text) {
     return sent;
 }
 
+static BOOL XLWriteSystemPasteboard(NSString *text) {
+    if (!text.length) return NO;
+    __block BOOL written = NO;
+    void (^writePasteboard)(void) = ^{
+        @autoreleasepool {
+            UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+            pasteboard.string = text;
+            written = [pasteboard.string isEqualToString:text];
+        }
+    };
+    // UIKit pasteboard access must run on the main queue. The control server
+    // normally calls this from its socket queue, but keep the main-thread path
+    // safe in case the call site changes later.
+    if ([NSThread isMainThread]) {
+        writePasteboard();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), writePasteboard);
+    }
+    return written;
+}
+
 static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
     if (data.length == 0 || data.length > XLMaxMessagePayload) return 2;
     NSString *text = [[NSString alloc] initWithData:(NSData *)data encoding:NSUTF8StringEncoding];
     if (!text.length) return 3;
-    (void)sender;
+    // Prefer a real system paste. It works with custom editors and WebViews
+    // (including Baidu Speed) that reject the private insertText: fallback.
+    // The complete UTF-8 payload is pasted in one operation, so Chinese,
+    // numbers and long clipboard text all follow the same reliable path.
+    if (XLWriteSystemPasteboard(text)) {
+        usleep(80000);
+        if ([sender sendPasteShortcut]) return 0;
+    }
+    // Keep the foreground-app injection path for unusual devices where the
+    // system pasteboard or external-keyboard shortcut is unavailable.
     return XLPostTextScalars(text) ? 0 : 4;
 }
 

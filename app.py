@@ -4,8 +4,11 @@ import argparse
 import asyncio
 import gc
 import logging
+import multiprocessing
+import os
 import threading
 import tkinter as tk
+import tracemalloc
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -18,10 +21,11 @@ from PIL import Image, ImageDraw, ImageTk  # noqa: E402
 from xinglan.device_discovery import discover_usb_udids_stable  # noqa: E402
 from xinglan.device_actions import (  # noqa: E402
     identify_physical_device,
-    PersistentDeviceActionHub,
+    send_action_to_devices,
 )
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
+from xinglan.ime_bridge import ImeBridgeClient  # noqa: E402
 from xinglan.diagnostics import (  # noqa: E402
     ProcessLoadSampler,
     StabilityMonitor,
@@ -581,11 +585,11 @@ class XinglanApp:
         self.health = tk.StringVar(value="帧率 0 · 内存 0 MB · 重连 0")
         self.load_sampler = ProcessLoadSampler()
         self.health_tick = 0
-        self.action_hub = PersistentDeviceActionHub()
-        self._keyboard_buffer = tk.StringVar(value="")
+        self._scan_in_progress = False
+        self._closing = False
         self._keyboard_pending = ""
         self._keyboard_flush_job: str | None = None
-        self._keyboard_buffer_busy = False
+        self._keyboard_commit_count = 0
 
         root.title("星澜 USB 原生群控 · 新版测试")
         root.configure(bg="#0b1220")
@@ -596,28 +600,13 @@ class XinglanApp:
             pass
         root.protocol("WM_DELETE_WINDOW", self.close)
 
-        # A one-pixel mapped Entry gives Windows IMEs a real text target while
-        # keeping the old StarLan layout unchanged.  Clicking a phone view
-        # focuses it; committed text is forwarded to the active phone field.
-        self.keyboard_capture = tk.Entry(
+        # Windows IME composition runs in a disposable helper process.  This
+        # keeps Microsoft IME native caches out of the long-running projection
+        # process while preserving direct Chinese input and Ctrl+V.
+        self.ime_bridge = ImeBridgeClient(
             root,
-            textvariable=self._keyboard_buffer,
-            borderwidth=0,
-            highlightthickness=0,
-            takefocus=True,
-        )
-        self.keyboard_capture.place(x=-2, y=-2, width=1, height=1)
-        self._keyboard_buffer.trace_add("write", self._keyboard_buffer_changed)
-        self.keyboard_capture.bind("<Control-v>", self._paste_clipboard)
-        self.keyboard_capture.bind("<Control-V>", self._paste_clipboard)
-        self.keyboard_capture.bind(
-            "<Return>", lambda _event: self._send_captured_key(0x07, 0x28, "回车")
-        )
-        self.keyboard_capture.bind(
-            "<KP_Enter>", lambda _event: self._send_captured_key(0x07, 0x28, "回车")
-        )
-        self.keyboard_capture.bind(
-            "<BackSpace>", lambda _event: self._send_captured_key(0x07, 0x2A, "退格")
+            self._receive_ime_text,
+            self._receive_ime_key,
         )
 
         # 严格复用旧版网页的 64px 顶栏和右侧 600px 操作区。
@@ -732,7 +721,8 @@ class XinglanApp:
         for row in range(WALL_ROWS):
             self.wall.grid_rowconfigure(row, weight=1, uniform="wall-rows")
 
-        self.scan_devices()
+        # 启动时只做一次同步扫描，后续扫描全部转到后台，绝不阻塞画面刷新。
+        self._scan_devices_initial()
         if not self.tiles and not self.empty_slots:
             self._rebuild_tiles()
         root.after(DISPLAY_INTERVAL_MS, self.refresh_tiles)
@@ -806,25 +796,13 @@ class XinglanApp:
         screen_y: int | None = None,
     ) -> None:
         """Route keyboard input and anchor the IME candidate by the click."""
-        if screen_x is not None and screen_y is not None:
-            local_x = max(1, min(self.root.winfo_width() - 2,
-                                 screen_x - self.root.winfo_rootx()))
-            local_y = max(1, min(self.root.winfo_height() - 2,
-                                 screen_y - self.root.winfo_rooty()))
-            self.keyboard_capture.place(x=local_x, y=local_y, width=1, height=1)
-        self.root.after_idle(self.keyboard_capture.focus_set)
-
-    def _keyboard_buffer_changed(self, *_args) -> None:
-        if self._keyboard_buffer_busy:
+        if screen_x is None or screen_y is None:
             return
-        text = self._keyboard_buffer.get()
+        self.ime_bridge.activate(screen_x, screen_y)
+
+    def _receive_ime_text(self, text: str) -> None:
         if not text:
             return
-        self._keyboard_buffer_busy = True
-        try:
-            self._keyboard_buffer.set("")
-        finally:
-            self._keyboard_buffer_busy = False
         self._keyboard_pending += text
         if self._keyboard_flush_job is not None:
             self.root.after_cancel(self._keyboard_flush_job)
@@ -837,23 +815,19 @@ class XinglanApp:
         text = self._keyboard_pending
         self._keyboard_pending = ""
         if text:
+            self._keyboard_commit_count += 1
+            LOGGER.info(
+                "keyboard commit batch=%s chars=%s bytes=%s memory=%.1fMB",
+                self._keyboard_commit_count,
+                len(text),
+                len(text.encode("utf-8")),
+                working_set_mb(),
+            )
             self.send_text_input(text)
 
-    def _paste_clipboard(self, _event: tk.Event | None = None) -> str:
-        try:
-            text = self.root.clipboard_get()
-        except tk.TclError:
-            self.summary.set("电脑剪贴板中没有可粘贴的文字")
-            return "break"
-        if text:
-            self._flush_keyboard_text()
-            self.send_text_input(text)
-        return "break"
-
-    def _send_captured_key(self, page: int, usage: int, label: str) -> str:
+    def _receive_ime_key(self, page: int, usage: int, label: str) -> None:
         self._flush_keyboard_text()
         self.send_key_event(page, usage, label)
-        return "break"
 
     def send_text_input(self, text: str | None = None) -> None:
         if text is None:
@@ -921,19 +895,12 @@ class XinglanApp:
             failed = len(result) - succeeded
             self.summary.set(f"{label}：成功 {succeeded} 台，失败 {failed} 台")
 
-        future = self.action_hub.broadcast(udids, action)
-
-        def finished(result_future) -> None:
-            try:
-                result = result_future.result()
-            except Exception as exc:  # pragma: no cover - defensive UI boundary
-                result = exc
-            try:
-                self.root.after(0, lambda: completed(result))
-            except tk.TclError:
-                pass
-
-        future.add_done_callback(finished)
+        # 只在点击按钮时同时建立通道并并发发送，不再为60台手机长期
+        # 保留后台连接。这样未投屏设备不会持续重连或占用内存。
+        self._run_async_action(
+            lambda: send_action_to_devices(udids, action),
+            completed,
+        )
 
     def wake_all_devices(self) -> None:
         self._run_all_device_action("wake", "全部开屏")
@@ -1544,14 +1511,58 @@ class XinglanApp:
         window.protocol("WM_DELETE_WINDOW", close_window)
         refresh_target_text()
 
-    def scan_devices(self) -> None:
+    def _discover_devices(self) -> list[str]:
+        return discover_usb_udids_stable(PROJECT_DIR)[: self.max_devices]
+
+    def _scan_devices_initial(self) -> None:
         try:
-            udids = discover_usb_udids_stable(PROJECT_DIR)[: self.max_devices]
+            udids = self._discover_devices()
         except Exception as exc:
             self.summary.set(f"USB扫描失败：{exc}")
-            LOGGER.warning("USB scan failed: %s", exc)
+            LOGGER.warning("USB initial scan failed: %s", exc)
             return
+        self._apply_device_scan(udids)
 
+    def scan_devices(self) -> None:
+        """在后台扫描USB设备，避免60台枚举冻结Tk画面刷新。"""
+        if self._closing or self._scan_in_progress:
+            return
+        self._scan_in_progress = True
+
+        def worker() -> None:
+            try:
+                result: tuple[list[str] | None, str | None] = (
+                    self._discover_devices(),
+                    None,
+                )
+            except Exception as exc:
+                result = (None, str(exc))
+            try:
+                self.root.after(0, lambda value=result: self._finish_device_scan(value))
+            except tk.TclError:
+                pass
+
+        threading.Thread(
+            target=worker,
+            name="xinglan-usb-scan",
+            daemon=True,
+        ).start()
+
+    def _finish_device_scan(
+        self,
+        result: tuple[list[str] | None, str | None],
+    ) -> None:
+        self._scan_in_progress = False
+        if self._closing:
+            return
+        udids, error = result
+        if error is not None or udids is None:
+            self.summary.set(f"USB扫描失败：{error or '未知错误'}")
+            LOGGER.warning("USB scan failed: %s", error or "unknown error")
+            return
+        self._apply_device_scan(udids)
+
+    def _apply_device_scan(self, udids: list[str]) -> None:
         current = set(udids)
         # 新手机只进入“未设置”列表，绝不自动占用分组位置。
         changed = False
@@ -1579,11 +1590,7 @@ class XinglanApp:
             LOGGER.info("USB device discovered, waiting for manual projection: %s", udid)
             changed = True
 
-        # Prepare lightweight control-only channels for every connected phone.
-        # This does not start projection or decoding; it only restores the
-        # legacy instant all-wake/all-sleep behavior.
         stable_udids = sorted(self.sessions)
-        self.action_hub.update_devices(stable_udids)
 
         if changed:
             self._refresh_group_selector()
@@ -1742,14 +1749,33 @@ class XinglanApp:
                 LOGGER.info("stability test completed report=%s", report)
         self.health_tick += 1
         if self.health_tick % 10 == 0:
+            python_heap_mb = 0.0
+            python_peak_mb = 0.0
+            if tracemalloc.is_tracing():
+                current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+                python_heap_mb = current_bytes / (1024 * 1024)
+                python_peak_mb = peak_bytes / (1024 * 1024)
             LOGGER.info(
-                "health devices=%s total_fps=%.1f hardware=%s software=%s cpu=%.1f%% memory=%.1fMB reconnects=%s decode_errors=%s max_frame_age=%.0fms",
+                "health devices=%s total_fps=%.1f hardware=%s software=%s cpu=%.1f%% memory=%.1fMB pyheap=%.1fMB pypeak=%.1fMB gc_objects=%s py_threads=%s reconnects=%s decode_errors=%s max_frame_age=%.0fms",
                 len(stats), total_fps, hardware_decoders, software_decoders,
-                cpu_percent, memory_mb, reconnects, decode_errors, max_age_ms,
+                cpu_percent, memory_mb, python_heap_mb, python_peak_mb,
+                len(gc.get_objects()), threading.active_count(),
+                reconnects, decode_errors, max_age_ms,
             )
+            if tracemalloc.is_tracing() and self.health_tick % 60 == 0:
+                top = tracemalloc.take_snapshot().statistics("filename")[:8]
+                LOGGER.info(
+                    "python heap top: %s",
+                    " | ".join(
+                        f"{item.traceback[0].filename}:{item.size / (1024 * 1024):.1f}MB/{item.count}"
+                        for item in top
+                    ),
+                )
         self.root.after(1000, self.refresh_health)
 
     def close(self) -> None:
+        self._closing = True
+        self.ime_bridge.close()
         if (
             self.stability_monitor is not None
             and self.stability_monitor.sample_count
@@ -1761,16 +1787,19 @@ class XinglanApp:
             LOGGER.info("partial stability report=%s", report)
         for session in self.sessions.values():
             session.stop()
-        self.action_hub.close()
         self.root.after(120, self.root.destroy)
 
 
 def main() -> None:
+    multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(description="星澜 USB 原生群控新版")
     parser.add_argument("--max-devices", type=int, default=60)
     parser.add_argument("--stability-minutes", type=float, default=0.0)
     args = parser.parse_args()
     log_path = configure_logging(PROJECT_DIR)
+    if os.environ.get("XINGLAN_TRACE_MEMORY", "").strip() == "1":
+        tracemalloc.start(1)
+        LOGGER.info("Python memory tracing enabled")
     decoder_backend = probe_hardware_backend(PROJECT_DIR)
     LOGGER.info(
         "application starting max_devices=%s decoder=%s log=%s",
