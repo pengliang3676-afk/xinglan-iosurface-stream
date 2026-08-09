@@ -93,7 +93,7 @@ class DeviceTile:
         self.title.pack(fill="both", expand=True, padx=4)
         self.canvas = tk.Canvas(
             self.frame, width=tile_width, height=tile_height, bg="#050a11",
-            highlightthickness=0, cursor="hand2"
+            highlightthickness=0, cursor="arrow"
         )
         self.canvas.place(
             x=0,
@@ -416,7 +416,7 @@ class MasterView:
             height=height,
             bg="black",
             highlightthickness=0,
-            cursor="hand2",
+            cursor="arrow",
         )
         self.canvas.pack(fill="both", expand=True)
         self.image_item = self.canvas.create_image(0, 0, anchor="nw")
