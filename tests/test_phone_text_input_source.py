@@ -6,23 +6,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PhoneTextInputSourceTests(unittest.TestCase):
-    def test_text_input_prefers_foreground_app_paste(self):
+    def test_text_input_requires_foreground_app_ack(self):
         source = (ROOT / "phone" / "XLControlServer.mm").read_text(encoding="utf-8")
         handler = source[source.index("static uint32_t XLHandleTextInput") :]
         self.assertIn("XLPostPasteText(text)", handler)
-        self.assertIn("XLPostTextScalars(text)", handler)
-        self.assertLess(
-            handler.index("XLPostPasteText(text)"),
-            handler.index("XLPostTextScalars(text)"),
-        )
+        self.assertIn("XLTextPasteAckNotification", source)
+        self.assertIn("(ackState >> 1) == request", source)
+        self.assertNotIn("XLPostTextScalars(text) ? 0", handler)
 
     def test_foreground_tweak_reassembles_and_pastes_complete_text(self):
         source = (ROOT / "phone" / "XLSystemActions.xm").read_text(encoding="utf-8")
         self.assertIn("XLTextPasteBeginNotification", source)
         self.assertIn("XLTextPasteChunkNotification", source)
         self.assertIn("XLTextPasteCommitNotification", source)
+        self.assertIn("XLTextPasteAckNotification", source)
         self.assertIn("UIPasteboard.generalPasteboard.string = text", source)
-        self.assertIn("XLPasteIntoFocusedControl()", source)
+        self.assertIn("UIKeyboardImpl", source)
+        self.assertIn("XLInsertTextThroughKeyboard(text)", source)
+        self.assertIn("XLPostPasteAck(request", source)
 
     def test_paste_shortcut_has_modifier_timing(self):
         source = (ROOT / "phone" / "XLHIDSender.mm").read_text(encoding="utf-8")
@@ -37,9 +38,9 @@ class PhoneTextInputSourceTests(unittest.TestCase):
         info = (ROOT / "phone" / "layout" / "Applications" / "XLStream.app" / "Info.plist").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Version: 0.5.1", control)
-        self.assertIn("<string>0.5.1</string>", info)
-        self.assertIn("<string>51</string>", info)
+        self.assertIn("Version: 0.5.2", control)
+        self.assertIn("<string>0.5.2</string>", info)
+        self.assertIn("<string>52</string>", info)
 
     def test_package_scripts_never_wait_for_launchctl(self):
         scripts = ROOT / "phone" / "layout" / "DEBIAN"

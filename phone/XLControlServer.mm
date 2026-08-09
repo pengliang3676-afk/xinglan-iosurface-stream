@@ -25,6 +25,7 @@ static const char *XLTextInsertNotification = "com.jibeib.xlstream.text.insert";
 static const char *XLTextPasteBeginNotification = "com.jibeib.xlstream.text.paste.begin";
 static const char *XLTextPasteChunkNotification = "com.jibeib.xlstream.text.paste.chunk";
 static const char *XLTextPasteCommitNotification = "com.jibeib.xlstream.text.paste.commit";
+static const char *XLTextPasteAckNotification = "com.jibeib.xlstream.text.paste.ack";
 static const char *XLTextDeleteNotification = "com.jibeib.xlstream.text.delete";
 static const char *XLTextReturnNotification = "com.jibeib.xlstream.text.return";
 
@@ -150,11 +151,23 @@ static BOOL XLPostTextScalars(NSString *text) {
 static BOOL XLPostPasteText(NSString *text) {
     NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
     if (utf8.length == 0 || utf8.length > XLMaxMessagePayload) return NO;
-    int token = 0;
-    if (notify_register_check(XLTextPasteChunkNotification, &token) != NOTIFY_STATUS_OK) {
+    static std::atomic_uint_fast64_t nextRequest(1);
+    uint64_t request = nextRequest.fetch_add(1);
+    request &= 0x7FFFFFFFFFFFFFFFULL;
+    if (request == 0) request = nextRequest.fetch_add(1) & 0x7FFFFFFFFFFFFFFFULL;
+    int beginToken = 0;
+    int chunkToken = 0;
+    int ackToken = 0;
+    if (notify_register_check(XLTextPasteBeginNotification, &beginToken) != NOTIFY_STATUS_OK ||
+        notify_register_check(XLTextPasteChunkNotification, &chunkToken) != NOTIFY_STATUS_OK ||
+        notify_register_check(XLTextPasteAckNotification, &ackToken) != NOTIFY_STATUS_OK) {
+        if (beginToken) notify_cancel(beginToken);
+        if (chunkToken) notify_cancel(chunkToken);
+        if (ackToken) notify_cancel(ackToken);
         return NO;
     }
-    BOOL sent = notify_post(XLTextPasteBeginNotification) == NOTIFY_STATUS_OK;
+    BOOL sent = notify_set_state(beginToken, request) == NOTIFY_STATUS_OK &&
+                notify_post(XLTextPasteBeginNotification) == NOTIFY_STATUS_OK;
     usleep(30000);
     const uint8_t *bytes = (const uint8_t *)utf8.bytes;
     for (NSUInteger offset = 0; sent && offset < utf8.length; offset += 7) {
@@ -163,7 +176,7 @@ static BOOL XLPostPasteText(NSString *text) {
         for (NSUInteger index = 0; index < length; index++) {
             state |= ((uint64_t)bytes[offset + index] << (index * 8));
         }
-        sent = notify_set_state(token, state) == NOTIFY_STATUS_OK &&
+        sent = notify_set_state(chunkToken, state) == NOTIFY_STATUS_OK &&
                notify_post(XLTextPasteChunkNotification) == NOTIFY_STATUS_OK;
         // Keep consecutive state updates from being coalesced before the
         // foreground app has copied each chunk.
@@ -172,21 +185,30 @@ static BOOL XLPostPasteText(NSString *text) {
     if (sent) {
         sent = notify_post(XLTextPasteCommitNotification) == NOTIFY_STATUS_OK;
     }
-    notify_cancel(token);
-    return sent;
+    BOOL applied = NO;
+    for (NSUInteger attempt = 0; sent && attempt < 75; attempt++) {
+        uint64_t ackState = 0;
+        if (notify_get_state(ackToken, &ackState) == NOTIFY_STATUS_OK &&
+            (ackState >> 1) == request) {
+            applied = (ackState & 1) != 0;
+            break;
+        }
+        usleep(10000);
+    }
+    notify_cancel(beginToken);
+    notify_cancel(chunkToken);
+    notify_cancel(ackToken);
+    return sent && applied;
 }
 
 static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
     if (data.length == 0 || data.length > XLMaxMessagePayload) return 2;
     NSString *text = [[NSString alloc] initWithData:(NSData *)data encoding:NSUTF8StringEncoding];
     if (!text.length) return 3;
-    // Transfer the complete UTF-8 payload into the foreground app. The tweak
-    // sets that app's own pasteboard and invokes paste: on its responder chain,
-    // which also supports custom WebView editors such as Baidu Speed.
-    if (XLPostPasteText(text)) return 0;
-    // Retain scalar insertion as a compatibility fallback for old tweaks.
+    // Only acknowledge success after the foreground app confirms that it
+    // applied the text through its active iOS keyboard/input responder.
     (void)sender;
-    return XLPostTextScalars(text) ? 0 : 4;
+    return XLPostPasteText(text) ? 0 : 4;
 }
 
 static uint32_t XLHandleKeyEvent(XLHIDSender *sender, const NSData *data) {
