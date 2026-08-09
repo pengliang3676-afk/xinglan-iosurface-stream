@@ -6,9 +6,7 @@
     <string>com.jibeib.xlstreamd</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>if [ -x /Applications/XLStream.app/bin/xlstreamd ]; then exec /Applications/XLStream.app/bin/xlstreamd; else exec /var/jb/Applications/XLStream.app/bin/xlstreamd; fi</string>
+        <string>/Applications/XLStream.app/bin/xlstreamd</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -22,5 +20,9 @@
     <string>App</string>
     <key>HighPriorityIO</key>
     <true/>
+    <key>StandardOutPath</key>
+    <string>/var/mobile/Media/XLStream.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/mobile/Media/XLStream.stderr.log</string>
 </dict>
 </plist>

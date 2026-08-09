@@ -30,6 +30,11 @@ jobs:
           THEOS: ${{ runner.temp }}/theos-link
         run: |
           ln -s "$HOME/theos" "$THEOS"
+          if [ "${{ matrix.scheme }}" = "rootless" ]; then
+            /usr/libexec/PlistBuddy -c \
+              "Set :ProgramArguments:0 /var/jb/Applications/XLStream.app/bin/xlstreamd" \
+              phone/layout/Library/LaunchDaemons/com.jibeib.xlstreamd.plist
+          fi
           make -C phone clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
 
       - name: Collect package
