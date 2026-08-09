@@ -24,6 +24,62 @@ static const char *XLTextInsertNotification = "com.jibeib.xlstream.text.insert";
 static CFStringRef const XLTextDeleteNotification = CFSTR("com.jibeib.xlstream.text.delete");
 static CFStringRef const XLTextReturnNotification = CFSTR("com.jibeib.xlstream.text.return");
 
+static UIResponder *XLFirstResponderInView(UIView *view) {
+    if (view.isFirstResponder) return view;
+    for (UIView *subview in view.subviews) {
+        UIResponder *responder = XLFirstResponderInView(subview);
+        if (responder) return responder;
+    }
+    return nil;
+}
+
+static UIResponder *XLCurrentFirstResponder(void) {
+    UIApplication *application = UIApplication.sharedApplication;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in application.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            UISceneActivationState state = scene.activationState;
+            if (state != UISceneActivationStateForegroundActive &&
+                state != UISceneActivationStateForegroundInactive) continue;
+            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                UIResponder *responder = XLFirstResponderInView(window);
+                if (responder) return responder;
+            }
+        }
+    }
+    for (UIWindow *window in application.windows) {
+        UIResponder *responder = XLFirstResponderInView(window);
+        if (responder) return responder;
+    }
+    return nil;
+}
+
+static BOOL XLInsertTextIntoFocusedControl(NSString *text) {
+    UIResponder *responder = XLCurrentFirstResponder();
+    SEL selector = @selector(insertText:);
+    if (responder && [responder respondsToSelector:selector]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(responder, selector, text);
+        return YES;
+    }
+    return [UIApplication.sharedApplication sendAction:selector
+                                                     to:nil
+                                                   from:text
+                                               forEvent:nil];
+}
+
+static BOOL XLDeleteFromFocusedControl(void) {
+    UIResponder *responder = XLCurrentFirstResponder();
+    SEL selector = @selector(deleteBackward);
+    if (responder && [responder respondsToSelector:selector]) {
+        ((void (*)(id, SEL))objc_msgSend)(responder, selector);
+        return YES;
+    }
+    return [UIApplication.sharedApplication sendAction:selector
+                                                     to:nil
+                                                   from:nil
+                                               forEvent:nil];
+}
+
 static id XLShared(Class cls) {
     SEL selector = NSSelectorFromString(@"sharedInstance");
     if (!cls || ![cls respondsToSelector:selector]) return nil;
@@ -65,11 +121,10 @@ static void XLTextInputNotification(
     (void)object;
     (void)userInfo;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIApplication *application = UIApplication.sharedApplication;
         if (CFStringCompare(name, XLTextDeleteNotification, 0) == kCFCompareEqualTo) {
-            [application sendAction:@selector(deleteBackward) to:nil from:nil forEvent:nil];
+            XLDeleteFromFocusedControl();
         } else if (CFStringCompare(name, XLTextReturnNotification, 0) == kCFCompareEqualTo) {
-            [application sendAction:@selector(insertText:) to:nil from:@"\n" forEvent:nil];
+            XLInsertTextIntoFocusedControl(@"\n");
         }
     });
 }
@@ -108,10 +163,7 @@ static void XLTextInputNotification(
                                                    length:length
                                                  encoding:NSUTF8StringEncoding];
         if (text.length) {
-            [UIApplication.sharedApplication sendAction:@selector(insertText:)
-                                                     to:nil
-                                                   from:text
-                                               forEvent:nil];
+            XLInsertTextIntoFocusedControl(text);
         }
     });
     return self;
