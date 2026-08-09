@@ -21,7 +21,7 @@ static std::atomic_uint XLControlErrors(0);
 
 static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
 static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
-static const char *XLTextPasteNotification = "com.jibeib.xlstream.text.paste";
+static const char *XLTextInsertNotification = "com.jibeib.xlstream.text.insert";
 static const char *XLTextDeleteNotification = "com.jibeib.xlstream.text.delete";
 static const char *XLTextReturnNotification = "com.jibeib.xlstream.text.return";
 
@@ -101,23 +101,55 @@ static uint32_t XLHandleTouch(XLHIDSender *sender, const NSData *data) {
                          pressure:pressure] ? 0 : 4;
 }
 
+static BOOL XLPostTextScalars(NSString *text) {
+    int token = 0;
+    if (notify_register_check(XLTextInsertNotification, &token) != NOTIFY_STATUS_OK) {
+        return NO;
+    }
+    BOOL sent = YES;
+    for (NSUInteger index = 0; index < text.length;) {
+        NSRange range = [text rangeOfComposedCharacterSequenceAtIndex:index];
+        NSString *part = [text substringWithRange:range];
+        NSData *utf8 = [part dataUsingEncoding:NSUTF8StringEncoding];
+        // A composed emoji can exceed seven bytes. Split it at Unicode scalar
+        // boundaries so every notification fits into notify's 64-bit state.
+        if (utf8.length > 7) {
+            unichar first = [text characterAtIndex:index];
+            range.length = (CFStringIsSurrogateHighCharacter(first) &&
+                            index + 1 < text.length &&
+                            CFStringIsSurrogateLowCharacter([text characterAtIndex:index + 1])) ? 2 : 1;
+            part = [text substringWithRange:range];
+            utf8 = [part dataUsingEncoding:NSUTF8StringEncoding];
+        }
+        if (utf8.length == 0 || utf8.length > 7) {
+            sent = NO;
+            break;
+        }
+        uint64_t state = ((uint64_t)utf8.length << 56);
+        const uint8_t *bytes = (const uint8_t *)utf8.bytes;
+        for (NSUInteger byteIndex = 0; byteIndex < utf8.length; byteIndex++) {
+            state |= ((uint64_t)bytes[byteIndex] << (byteIndex * 8));
+        }
+        if (notify_set_state(token, state) != NOTIFY_STATUS_OK ||
+            notify_post(XLTextInsertNotification) != NOTIFY_STATUS_OK) {
+            sent = NO;
+            break;
+        }
+        // Prevent Darwin notifications for consecutive characters from being
+        // coalesced before the foreground app consumes the shared state.
+        usleep(20000);
+        index = NSMaxRange(range);
+    }
+    notify_cancel(token);
+    return sent;
+}
+
 static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
     if (data.length == 0 || data.length > XLMaxMessagePayload) return 2;
     NSString *text = [[NSString alloc] initWithData:(NSData *)data encoding:NSUTF8StringEncoding];
     if (!text.length) return 3;
-    // Match the proven legacy keyboard path: publish the Unicode text on the
-    // system pasteboard, then ask the foreground UIKit process to paste into
-    // its actual first responder.  The HID shortcut remains a compatibility
-    // fallback for a process that has not loaded the receiver yet.
-    __block BOOL clipboardSet = NO;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        UIPasteboard.generalPasteboard.string = text;
-        clipboardSet = [UIPasteboard.generalPasteboard.string isEqualToString:text];
-    });
-    if (!clipboardSet) return 4;
-    if (notify_post(XLTextPasteNotification) == NOTIFY_STATUS_OK) return 0;
-    usleep(50000);
-    return [sender sendPasteShortcut] ? 0 : 4;
+    (void)sender;
+    return XLPostTextScalars(text) ? 0 : 4;
 }
 
 static uint32_t XLHandleKeyEvent(XLHIDSender *sender, const NSData *data) {

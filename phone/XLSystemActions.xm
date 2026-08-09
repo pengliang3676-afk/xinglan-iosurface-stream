@@ -20,7 +20,7 @@
 
 static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
 static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
-static CFStringRef const XLTextPasteNotification = CFSTR("com.jibeib.xlstream.text.paste");
+static const char *XLTextInsertNotification = "com.jibeib.xlstream.text.insert";
 static CFStringRef const XLTextDeleteNotification = CFSTR("com.jibeib.xlstream.text.delete");
 static CFStringRef const XLTextReturnNotification = CFSTR("com.jibeib.xlstream.text.return");
 
@@ -66,15 +66,7 @@ static void XLTextInputNotification(
     (void)userInfo;
     dispatch_async(dispatch_get_main_queue(), ^{
         UIApplication *application = UIApplication.sharedApplication;
-        if (CFStringCompare(name, XLTextPasteNotification, 0) == kCFCompareEqualTo) {
-            BOOL pasted = [application sendAction:@selector(paste:) to:nil from:nil forEvent:nil];
-            if (!pasted) {
-                NSString *text = UIPasteboard.generalPasteboard.string ?: @"";
-                if (text.length) {
-                    [application sendAction:@selector(insertText:) to:nil from:text forEvent:nil];
-                }
-            }
-        } else if (CFStringCompare(name, XLTextDeleteNotification, 0) == kCFCompareEqualTo) {
+        if (CFStringCompare(name, XLTextDeleteNotification, 0) == kCFCompareEqualTo) {
             [application sendAction:@selector(deleteBackward) to:nil from:nil forEvent:nil];
         } else if (CFStringCompare(name, XLTextReturnNotification, 0) == kCFCompareEqualTo) {
             [application sendAction:@selector(insertText:) to:nil from:@"\n" forEvent:nil];
@@ -89,7 +81,6 @@ static void XLTextInputNotification(
     if (!self) return nil;
     CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
     NSArray<NSString *> *names = @[
-        (__bridge NSString *)XLTextPasteNotification,
         (__bridge NSString *)XLTextDeleteNotification,
         (__bridge NSString *)XLTextReturnNotification,
     ];
@@ -102,6 +93,27 @@ static void XLTextInputNotification(
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
     }
+    static int insertToken = 0;
+    notify_register_dispatch(XLTextInsertNotification, &insertToken,
+                             dispatch_get_main_queue(), ^(int token) {
+        uint64_t state = 0;
+        if (notify_get_state(token, &state) != NOTIFY_STATUS_OK) return;
+        NSUInteger length = (NSUInteger)((state >> 56) & 0xFF);
+        if (length == 0 || length > 7) return;
+        uint8_t bytes[7] = {};
+        for (NSUInteger index = 0; index < length; index++) {
+            bytes[index] = (uint8_t)((state >> (index * 8)) & 0xFF);
+        }
+        NSString *text = [[NSString alloc] initWithBytes:bytes
+                                                   length:length
+                                                 encoding:NSUTF8StringEncoding];
+        if (text.length) {
+            [UIApplication.sharedApplication sendAction:@selector(insertText:)
+                                                     to:nil
+                                                   from:text
+                                               forEvent:nil];
+        }
+    });
     return self;
 }
 
