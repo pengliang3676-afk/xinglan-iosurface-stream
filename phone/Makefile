@@ -5,6 +5,7 @@ THEOS_PACKAGE_SCHEME ?= roothide
 include $(THEOS)/makefiles/common.mk
 
 TOOL_NAME = XLStreamLauncher xlstreamd
+TWEAK_NAME = XLSystemActions
 
 XLStreamLauncher_FILES = XLLauncher.mm
 XLStreamLauncher_CFLAGS = -fobjc-arc -Wall -Wextra -Wno-error
@@ -18,4 +19,10 @@ xlstreamd_FRAMEWORKS = Foundation UIKit IOSurface VideoToolbox CoreMedia CoreVid
 xlstreamd_CODESIGN_FLAGS = -SEntitlements.plist
 xlstreamd_INSTALL_PATH = /Applications/XLStream.app/bin
 
+XLSystemActions_FILES = XLSystemActions.xm
+XLSystemActions_CFLAGS = -fobjc-arc -Wall -Wextra -Wno-error -Wno-deprecated-declarations
+XLSystemActions_FRAMEWORKS = Foundation UIKit
+XLSystemActions_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
+
 include $(THEOS_MAKE_PATH)/tool.mk
+include $(THEOS_MAKE_PATH)/tweak.mk

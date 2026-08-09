@@ -19,6 +19,12 @@
 
 static std::atomic_uint XLControlErrors(0);
 
+static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
+static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
+static const char *XLTextPasteNotification = "com.jibeib.xlstream.text.paste";
+static const char *XLTextDeleteNotification = "com.jibeib.xlstream.text.delete";
+static const char *XLTextReturnNotification = "com.jibeib.xlstream.text.return";
+
 static BOOL XLReadAll(int socketHandle, void *buffer, size_t length) {
     uint8_t *bytes = (uint8_t *)buffer;
     size_t offset = 0;
@@ -99,25 +105,18 @@ static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
     if (data.length == 0 || data.length > XLMaxMessagePayload) return 2;
     NSString *text = [[NSString alloc] initWithData:(NSData *)data encoding:NSUTF8StringEncoding];
     if (!text.length) return 3;
-    // UIKit's private keyboard insertion path handles Chinese, emoji and
-    // composed input directly.  It is the same path used by EagleEye's
-    // text-input implementation; keep the clipboard shortcut as fallback
-    // for iOS versions where UIKeyboardImpl is unavailable.
-    __block BOOL inserted = NO;
+    // Match the proven legacy keyboard path: publish the Unicode text on the
+    // system pasteboard, then ask the foreground UIKit process to paste into
+    // its actual first responder.  The HID shortcut remains a compatibility
+    // fallback for a process that has not loaded the receiver yet.
+    __block BOOL clipboardSet = NO;
     dispatch_sync(dispatch_get_main_queue(), ^{
-        Class keyboardClass = NSClassFromString(@"UIKeyboardImpl");
-        SEL sharedSelector = NSSelectorFromString(@"sharedInstance");
-        SEL insertSelector = NSSelectorFromString(@"insertText:");
-        if (!keyboardClass || ![keyboardClass respondsToSelector:sharedSelector]) return;
-        id (*sendObject)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-        id keyboard = sendObject((id)keyboardClass, sharedSelector);
-        if (!keyboard || ![keyboard respondsToSelector:insertSelector]) return;
-        void (*sendText)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
-        sendText(keyboard, insertSelector, text);
-        inserted = YES;
+        UIPasteboard.generalPasteboard.string = text;
+        clipboardSet = [UIPasteboard.generalPasteboard.string isEqualToString:text];
     });
-    if (inserted) return 0;
-    UIPasteboard.generalPasteboard.string = text;
+    if (!clipboardSet) return 4;
+    if (notify_post(XLTextPasteNotification) == NOTIFY_STATUS_OK) return 0;
+    usleep(50000);
     return [sender sendPasteShortcut] ? 0 : 4;
 }
 
@@ -125,7 +124,13 @@ static uint32_t XLHandleKeyEvent(XLHIDSender *sender, const NSData *data) {
     if (data.length != sizeof(XLKeyEventPayload)) return 2;
     XLKeyEventPayload payload = {};
     [data getBytes:&payload length:sizeof(payload)];
-    return [sender sendKeyboardPage:ntohl(payload.page) usage:ntohl(payload.usage)] ? 0 : 4;
+    uint32_t page = ntohl(payload.page);
+    uint32_t usage = ntohl(payload.usage);
+    if (page == 0x07 && usage == 0x2A &&
+        notify_post(XLTextDeleteNotification) == NOTIFY_STATUS_OK) return 0;
+    if (page == 0x07 && usage == 0x28 &&
+        notify_post(XLTextReturnNotification) == NOTIFY_STATUS_OK) return 0;
+    return [sender sendKeyboardPage:page usage:usage] ? 0 : 4;
 }
 
 static int XLScreenIsOn(void) {
@@ -147,6 +152,9 @@ static uint32_t XLHandleSystemAction(XLHIDSender *sender, const NSData *data) {
             return [sender sendHomeButton] ? 0 : 4;
         case XLSystemActionWake: {
             int state = XLScreenIsOn();
+            notify_post(XLScreenWakeNotification);
+            usleep(250000);
+            if (XLScreenIsOn() == 1) return 0;
             if (state != 1) {
                 if (![sender sendPowerButton]) return 4;
                 usleep(350000);
@@ -155,6 +163,9 @@ static uint32_t XLHandleSystemAction(XLHIDSender *sender, const NSData *data) {
         }
         case XLSystemActionLock: {
             int state = XLScreenIsOn();
+            notify_post(XLScreenLockNotification);
+            usleep(250000);
+            if (XLScreenIsOn() == 0) return 0;
             return state == 0 || [sender sendPowerButton] ? 0 : 4;
         }
         case XLSystemActionScreenshot:

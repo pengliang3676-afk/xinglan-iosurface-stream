@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageTk  # noqa: E402
 from xinglan.device_discovery import discover_usb_udids  # noqa: E402
 from xinglan.device_actions import (  # noqa: E402
     identify_physical_device,
-    send_action_to_devices,
+    PersistentDeviceActionHub,
 )
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
@@ -37,10 +37,12 @@ WALL_COLUMNS = 5
 WALL_ROWS = 2
 GROUP_SIZE = WALL_COLUMNS * WALL_ROWS
 TILE_VIEW_SIZE = (230, 408)
-MASTER_VIEW_SIZE = (400, 700)
-RIGHT_PANEL_WIDTH = 420
+MASTER_VIEW_SIZE = (356, 633)
+TOP_BAR_HEIGHT = 64
+RIGHT_PANEL_WIDTH = 360
 PHONE_HEAD_HEIGHT = 20
 SIDE_RAIL_WIDTH = 36
+WALL_GAP = 3
 DISPLAY_INTERVAL_MS = 80
 LOGGER = logging.getLogger("xinglan.app")
 
@@ -71,7 +73,7 @@ class DeviceTile:
         self.frame = tk.Frame(
             parent,
             bg="#1d2939",
-            highlightthickness=2,
+            highlightthickness=1,
             highlightbackground="#344054",
         )
         # 复刻旧版星澜卡片：20px 标题栏在画面上方，36px 操作栏贯穿整卡。
@@ -184,7 +186,13 @@ class DeviceTile:
         )
 
     def grid(self, row: int, column: int) -> None:
-        self.frame.grid(row=row, column=column, padx=1, pady=1, sticky="nsew")
+        self.frame.grid(
+            row=row,
+            column=column,
+            padx=(0, WALL_GAP if column < WALL_COLUMNS - 1 else 0),
+            pady=(0, WALL_GAP if row < WALL_ROWS - 1 else 0),
+            sticky="nsew",
+        )
 
     def destroy(self) -> None:
         self.canvas.delete("all")
@@ -195,7 +203,10 @@ class DeviceTile:
         color = "#d92d20" if active else "#344054"
         border = "#d92d20" if active else "#344054"
         self.master_button.configure(bg=color)
-        self.frame.configure(highlightbackground=border)
+        self.frame.configure(
+            highlightbackground=border,
+            highlightthickness=2 if active else 1,
+        )
 
     def set_connected(self, connected: bool) -> None:
         self.start_button.configure(state="disabled" if connected else "normal")
@@ -259,19 +270,13 @@ class DeviceTile:
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
         self.render_size = (canvas_width, canvas_height)
-        # 复刻星澜网页的 autoscale：保持手机比例，按可用区域等比例缩放。
-        scale = min(canvas_width / image.width, canvas_height / image.height)
-        width = max(1, int(image.width * scale))
-        height = max(1, int(image.height * scale))
-        resized = image if image.size == (width, height) else image.resize(
-            (width, height), Image.Resampling.LANCZOS
+        # 小窗口优先填满卡片画布，避免手机画面与右侧操作栏之间留下黑边。
+        target_size = (canvas_width, canvas_height)
+        resized = image if image.size == target_size else image.resize(
+            target_size, Image.Resampling.LANCZOS
         )
-        surface = Image.new("RGB", (canvas_width, canvas_height), "#050a11")
-        x = (canvas_width - width) // 2
-        y = (canvas_height - height) // 2
-        surface.paste(resized, (x, y))
-        self.image_bounds = (x, y, x + width, y + height)
-        self._set_photo(surface)
+        self.image_bounds = (0, 0, canvas_width, canvas_height)
+        self._set_photo(resized)
 
     def _normalized(self, event: tk.Event) -> tuple[float, float] | None:
         left, top, right, bottom = self.image_bounds
@@ -283,6 +288,7 @@ class DeviceTile:
         point = self._normalized(event)
         if point is None:
             return
+        self.owner.activate_keyboard_capture()
         self.dragging = True
         self.owner.route_touch(self.session, 1, *point, from_master=False)
 
@@ -366,7 +372,13 @@ class EmptySlot:
             ).pack(fill="x", padx=3, pady=2)
 
     def grid(self, row: int, column: int) -> None:
-        self.frame.grid(row=row, column=column, padx=1, pady=1, sticky="nsew")
+        self.frame.grid(
+            row=row,
+            column=column,
+            padx=(0, WALL_GAP if column < WALL_COLUMNS - 1 else 0),
+            pady=(0, WALL_GAP if row < WALL_ROWS - 1 else 0),
+            sticky="nsew",
+        )
 
     def destroy(self) -> None:
         self.frame.destroy()
@@ -387,8 +399,7 @@ class MasterView:
         self.frame = tk.Frame(
             parent,
             bg="#101828",
-            highlightthickness=2,
-            highlightbackground="#d58b00",
+            highlightthickness=0,
         )
         # 标题和状态由右侧顶部工具栏、全局状态栏承载；画面本身占满可用区域。
         self.title = tk.Label(
@@ -513,6 +524,7 @@ class MasterView:
         point = self._normalized(event)
         if point is None:
             return
+        self.owner.activate_keyboard_capture()
         self.dragging = True
         self.owner.route_touch(self.session, 1, *point, from_master=True)
 
@@ -569,6 +581,11 @@ class XinglanApp:
         self.health = tk.StringVar(value="帧率 0 · 内存 0 MB · 重连 0")
         self.load_sampler = ProcessLoadSampler()
         self.health_tick = 0
+        self.action_hub = PersistentDeviceActionHub()
+        self._keyboard_buffer = tk.StringVar(value="")
+        self._keyboard_pending = ""
+        self._keyboard_flush_job: str | None = None
+        self._keyboard_buffer_busy = False
 
         root.title("星澜 USB 原生群控 · 新版测试")
         root.configure(bg="#0b1220")
@@ -579,34 +596,102 @@ class XinglanApp:
             pass
         root.protocol("WM_DELETE_WINDOW", self.close)
 
-        # 与星澜网页一致：顶部 64px，主体区域自动占满最大化窗口。
-        toolbar = tk.Frame(root, bg="#1d2939", height=64)
+        # A one-pixel mapped Entry gives Windows IMEs a real text target while
+        # keeping the old StarLan layout unchanged.  Clicking a phone view
+        # focuses it; committed text is forwarded to the active phone field.
+        self.keyboard_capture = tk.Entry(
+            root,
+            textvariable=self._keyboard_buffer,
+            borderwidth=0,
+            highlightthickness=0,
+            takefocus=True,
+        )
+        self.keyboard_capture.place(x=-2, y=-2, width=1, height=1)
+        self._keyboard_buffer.trace_add("write", self._keyboard_buffer_changed)
+        self.keyboard_capture.bind("<Control-v>", self._paste_clipboard)
+        self.keyboard_capture.bind("<Control-V>", self._paste_clipboard)
+        self.keyboard_capture.bind(
+            "<Return>", lambda _event: self._send_captured_key(0x07, 0x28, "回车")
+        )
+        self.keyboard_capture.bind(
+            "<KP_Enter>", lambda _event: self._send_captured_key(0x07, 0x28, "回车")
+        )
+        self.keyboard_capture.bind(
+            "<BackSpace>", lambda _event: self._send_captured_key(0x07, 0x2A, "退格")
+        )
+
+        # 严格复用旧版网页的 64px 顶栏和右侧 600px 操作区。
+        toolbar = tk.Frame(root, bg="#1d2939", height=TOP_BAR_HEIGHT)
         toolbar.pack(fill="x", padx=10, pady=(8, 6))
+        toolbar.pack_propagate(False)
         tk.Label(
             toolbar, text="星澜 USB 原生群控", bg="#1d2939", fg="white",
             font=("Microsoft YaHei UI", 18, "bold")
-        ).pack(side="left", padx=12, pady=8)
-        ttk.Checkbutton(toolbar, text="同步群控", variable=self.sync_enabled).pack(side="right", padx=12)
-        ttk.Button(toolbar, text="刷新设备", command=self.scan_devices).pack(side="right", padx=6)
-        ttk.Button(toolbar, text="分组设置", command=self.open_group_settings).pack(side="right", padx=6)
-        ttk.Button(toolbar, text="全部熄屏", command=self.sleep_all_devices).pack(side="right", padx=6)
-        ttk.Button(toolbar, text="全部开屏", command=self.wake_all_devices).pack(side="right", padx=6)
+        ).place(x=12, y=0, height=TOP_BAR_HEIGHT)
+
+        # 四个顶部按钮与右侧主控栏共用同一条左右边界。
+        # 这样“全部开屏”的左边缘会和下方“全选”严格对齐。
+        top_actions = tk.Frame(toolbar, bg="#1d2939")
+        top_actions.place(
+            relx=1,
+            x=0,
+            y=15,
+            width=RIGHT_PANEL_WIDTH,
+            height=34,
+            anchor="ne",
+        )
+        top_actions.grid_rowconfigure(0, weight=1)
+        for column in range(4):
+            top_actions.grid_columnconfigure(column, weight=1, uniform="top-actions")
+
+        # 状态文字独立放在按钮左侧，避免再把按钮挤窄。
+        status_block = tk.Frame(toolbar, bg="#1d2939")
+        status_block.place(
+            relx=1,
+            x=-(RIGHT_PANEL_WIDTH + 20),
+            y=11,
+            width=620,
+            height=42,
+            anchor="ne",
+        )
         tk.Label(
-            toolbar, textvariable=self.health, bg="#1d2939", fg="#d0d5dd",
-            font=("Microsoft YaHei UI", 9)
-        ).pack(side="right", padx=12)
+            status_block, textvariable=self.summary, bg="#1d2939", fg="#d0d5dd",
+            anchor="e", font=("Microsoft YaHei UI", 8),
+        ).pack(fill="x")
         tk.Label(
-            toolbar, textvariable=self.summary, bg="#1d2939", fg="#d0d5dd",
-            anchor="e", justify="right", font=("Microsoft YaHei UI", 9)
-        ).pack(side="right", padx=12)
-        # 同步开关按星澜网页放在右侧主控栏，顶部只保留状态和刷新设备。
-        for child in toolbar.winfo_children():
-            if isinstance(child, ttk.Checkbutton):
-                child.pack_forget()
+            status_block, textvariable=self.health, bg="#1d2939", fg="#d0d5dd",
+            anchor="e", font=("Microsoft YaHei UI", 8),
+        ).pack(fill="x")
+
+        for column, (text, command) in enumerate(
+            (
+                ("全部开屏", self.wake_all_devices),
+                ("全部熄屏", self.sleep_all_devices),
+                ("刷新设备", self.scan_devices),
+                ("分组设置", self.open_group_settings),
+            )
+        ):
+            tk.Button(
+                top_actions, text=text, command=command,
+                bg="#2e90fa", fg="white", activebackground="#1570ef",
+                activeforeground="white", relief="flat", borderwidth=0,
+                font=("Microsoft YaHei UI", 9, "bold"),
+            ).grid(
+                row=0,
+                column=column,
+                sticky="nsew",
+                padx=(0 if column == 0 else 2, 0),
+            )
 
         self.shell = tk.Frame(root, bg="#0b1220")
-        self.shell.pack(fill="both", expand=True, padx=8, pady=4)
-        self.right_panel = tk.Frame(self.shell, width=RIGHT_PANEL_WIDTH, bg="#0b1220")
+        self.shell.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.right_panel = tk.Frame(
+            self.shell,
+            width=RIGHT_PANEL_WIDTH,
+            bg="#101828",
+            highlightthickness=2,
+            highlightbackground="#d58b00",
+        )
         self.right_panel.pack(side="right", fill="y", padx=(7, 0))
         self.right_panel.pack_propagate(False)
         self.right_panel.grid_columnconfigure(0, weight=1)
@@ -636,7 +721,7 @@ class XinglanApp:
             bg="#2e90fa", fg="white", relief="flat", padx=8,
         ).pack(side="right", fill="y", padx=(3, 5), pady=3)
         self.master_view = MasterView(self, self.right_panel)
-        self.master_view.frame.grid(row=1, column=0, sticky="nsew", pady=(0, 5))
+        self.master_view.frame.grid(row=1, column=0, sticky="nsew")
         self._build_right_controls()
         self.left_panel = tk.Frame(self.shell, bg="#0b1220")
         self.left_panel.pack(side="left", fill="both", expand=True)
@@ -658,77 +743,111 @@ class XinglanApp:
         """Build the right-side controls in the same order as the StarLan web UI."""
         self.controls = tk.Frame(self.right_panel, bg="#101828")
         self.controls.grid(row=2, column=0, sticky="ew")
+
+        def fixed_row(parent: tk.Widget, *, bottom: int = 4) -> tk.Frame:
+            row = tk.Frame(parent, bg="#101828", height=44)
+            row.pack(fill="x", padx=8, pady=(4, bottom))
+            row.pack_propagate(False)
+            return row
+
         group_row = tk.Frame(self.controls, bg="#101828")
+        group_row.configure(height=44)
         group_row.pack(fill="x", padx=8, pady=(8, 4))
+        group_row.pack_propagate(False)
         self.group_var = tk.StringVar(value="第1组")
         self.group_combo = ttk.Combobox(
             group_row, textvariable=self.group_var,
             values=["第1组"], state="readonly", width=7,
         )
-        self.group_combo.pack(side="left", padx=(0, 7))
+        self.group_combo.pack(side="left", fill="y", padx=(0, 7))
         self.group_combo.bind("<<ComboboxSelected>>", self._group_changed)
         self.group_button = tk.Button(
             group_row, text="连接本组", command=self.toggle_current_group,
-            bg="#12b76a", fg="white", relief="flat",
+            bg="#12b76a", fg="white", relief="flat", borderwidth=0,
+            font=("Microsoft YaHei UI", 10, "bold"),
         )
-        self.group_button.pack(side="left", fill="x", expand=True)
-        text_row = tk.Frame(self.controls, bg="#101828")
-        text_row.pack(fill="x", padx=8, pady=(4, 2))
+        self.group_button.pack(side="left", fill="both", expand=True)
+
+        # 中文输入后续由不可见的键盘接收器承载；右侧不再额外占两行，
+        # 以保持和旧版网页完全一致的主控画面高度。
         self.text_input_var = tk.StringVar()
-        self.text_input = tk.Entry(
-            text_row,
-            textvariable=self.text_input_var,
-            bg="#ffffff",
-            fg="#101828",
-            relief="flat",
-            font=("Microsoft YaHei UI", 10),
-        )
-        self.text_input.pack(side="left", fill="x", expand=True, padx=(0, 5), ipady=4)
-        self.text_input.bind("<Return>", lambda _event: self.send_text_input())
-        tk.Button(
-            text_row,
-            text="发送文字",
-            command=self.send_text_input,
-            bg="#12b76a",
-            fg="white",
-            relief="flat",
-            padx=8,
-        ).pack(side="right", fill="y")
-        key_row = tk.Frame(self.controls, bg="#101828")
-        key_row.pack(fill="x", padx=8, pady=(2, 4))
-        for label, page, usage in (("回车", 0x07, 0x28), ("退格", 0x07, 0x2A)):
-            tk.Button(
-                key_row,
-                text=label,
-                command=lambda p=page, u=usage, t=label: self.send_key_event(p, u, t),
-                bg="#475467",
-                fg="white",
-                relief="flat",
-            ).pack(side="left", fill="x", expand=True, padx=2)
+
         for text, command in (
             ("切换窗口", self.switch_window),
             ("返回主屏", lambda: self.route_system_action(SystemAction.HOME)),
             ("文件传输", self.open_file_transfer),
         ):
+            row = fixed_row(self.controls)
             tk.Button(
-                self.controls, text=text, command=command,
-                bg="#2e90fa", fg="white", relief="flat", height=2,
-            ).pack(fill="x", padx=8, pady=4)
-        mode_row = tk.Frame(self.controls, bg="#101828")
+                row, text=text, command=command,
+                bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
+                font=("Microsoft YaHei UI", 10),
+            ).pack(fill="both", expand=True)
+
+        mode_row = tk.Frame(self.controls, bg="#101828", height=44)
         mode_row.pack(fill="x", padx=8, pady=(4, 8))
+        mode_row.pack_propagate(False)
         tk.Button(
             mode_row, text="全部投屏",
             command=self.start_current_group,
-            bg="#2e90fa", fg="white", relief="flat", height=2,
-        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+            bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(side="left", fill="both", expand=True, padx=(0, 4))
         tk.Button(
             mode_row, text="全部停屏",
             command=self.stop_current_group,
-            bg="#2e90fa", fg="white", relief="flat", height=2,
-        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+            bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(side="left", fill="both", expand=True, padx=(4, 0))
 
-    def send_text_input(self) -> None:
-        text = self.text_input_var.get()
+    def activate_keyboard_capture(self) -> None:
+        """Route subsequent Windows keyboard/IME input to the phone canvas."""
+        self.root.after_idle(self.keyboard_capture.focus_set)
+
+    def _keyboard_buffer_changed(self, *_args) -> None:
+        if self._keyboard_buffer_busy:
+            return
+        text = self._keyboard_buffer.get()
+        if not text:
+            return
+        self._keyboard_buffer_busy = True
+        try:
+            self._keyboard_buffer.set("")
+        finally:
+            self._keyboard_buffer_busy = False
+        self._keyboard_pending += text
+        if self._keyboard_flush_job is not None:
+            self.root.after_cancel(self._keyboard_flush_job)
+        # Coalesce fast English typing while preserving a committed Chinese
+        # IME candidate as one Unicode payload.
+        self._keyboard_flush_job = self.root.after(45, self._flush_keyboard_text)
+
+    def _flush_keyboard_text(self) -> None:
+        self._keyboard_flush_job = None
+        text = self._keyboard_pending
+        self._keyboard_pending = ""
+        if text:
+            self.send_text_input(text)
+
+    def _paste_clipboard(self, _event: tk.Event | None = None) -> str:
+        try:
+            text = self.root.clipboard_get()
+        except tk.TclError:
+            self.summary.set("电脑剪贴板中没有可粘贴的文字")
+            return "break"
+        if text:
+            self._flush_keyboard_text()
+            self.send_text_input(text)
+        return "break"
+
+    def _send_captured_key(self, page: int, usage: int, label: str) -> str:
+        self._flush_keyboard_text()
+        self.send_key_event(page, usage, label)
+        return "break"
+
+    def send_text_input(self, text: str | None = None) -> None:
+        if text is None:
+            text = self.text_input_var.get()
         if not text:
             self.summary.set("请输入要发送的文字")
             return
@@ -792,10 +911,19 @@ class XinglanApp:
             failed = len(result) - succeeded
             self.summary.set(f"{label}：成功 {succeeded} 台，失败 {failed} 台")
 
-        self._run_async_action(
-            lambda: send_action_to_devices(udids, action),
-            completed,
-        )
+        future = self.action_hub.broadcast(udids, action)
+
+        def finished(result_future) -> None:
+            try:
+                result = result_future.result()
+            except Exception as exc:  # pragma: no cover - defensive UI boundary
+                result = exc
+            try:
+                self.root.after(0, lambda: completed(result))
+            except tk.TclError:
+                pass
+
+        future.add_done_callback(finished)
 
     def wake_all_devices(self) -> None:
         self._run_all_device_action("wake", "全部开屏")
@@ -1441,6 +1569,11 @@ class XinglanApp:
             LOGGER.info("USB device discovered, waiting for manual projection: %s", udid)
             changed = True
 
+        # Prepare lightweight control-only channels for every connected phone.
+        # This does not start projection or decoding; it only restores the
+        # legacy instant all-wake/all-sleep behavior.
+        self.action_hub.update_devices(udids)
+
         if changed:
             self._refresh_group_selector()
             self._rebuild_tiles()
@@ -1612,6 +1745,7 @@ class XinglanApp:
             LOGGER.info("partial stability report=%s", report)
         for session in self.sessions.values():
             session.stop()
+        self.action_hub.close()
         self.root.after(120, self.root.destroy)
 
 

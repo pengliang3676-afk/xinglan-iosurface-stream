@@ -12,7 +12,9 @@ from app import (
     PHONE_HEAD_HEIGHT,
     RIGHT_PANEL_WIDTH,
     SIDE_RAIL_WIDTH,
+    TOP_BAR_HEIGHT,
     WALL_COLUMNS,
+    WALL_GAP,
     WALL_ROWS,
 )
 
@@ -31,9 +33,11 @@ class LayoutTests(unittest.TestCase):
         self.assertLess(width / height, 0.65)
 
     def test_layout_matches_starlan_card_structure(self) -> None:
+        self.assertEqual(64, TOP_BAR_HEIGHT)
         self.assertEqual(20, PHONE_HEAD_HEIGHT)
         self.assertEqual(36, SIDE_RAIL_WIDTH)
-        self.assertEqual(420, RIGHT_PANEL_WIDTH)
+        self.assertEqual(3, WALL_GAP)
+        self.assertEqual(360, RIGHT_PANEL_WIDTH)
 
 
 if __name__ == "__main__":

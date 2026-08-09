@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import Iterable
+from concurrent.futures import Future
+from dataclasses import dataclass
 from typing import Any
 
 from .bootstrap import configure_dependencies
@@ -13,6 +16,7 @@ from .control_protocol import (
     MessageType,
     SystemAction,
     pack_hello,
+    pack_ping,
     pack_system_action,
     unpack_ack,
     unpack_header,
@@ -31,6 +35,18 @@ ACTION_MAP = {
     "sleep": SystemAction.LOCK,
     "switch": SystemAction.APP_SWITCHER,
 }
+
+
+@dataclass
+class _QueuedAction:
+    action: str
+    result: asyncio.Future[bool]
+
+
+@dataclass
+class _PersistentChannel:
+    queue: asyncio.Queue[_QueuedAction]
+    ready: asyncio.Event
 
 
 async def _read_exact(connection: Any, count: int, timeout: float) -> bytes:
@@ -138,6 +154,219 @@ async def send_action_to_devices(
         udid: bool(result) if not isinstance(result, BaseException) else False
         for udid, result in zip(ordered, results)
     }
+
+
+class PersistentDeviceActionHub:
+    """Keep one tiny control channel per USB phone for instant broadcasts.
+
+    The legacy StarLan UI already had a live tunnel for every phone.  Opening
+    sixty usbmux channels only after a button click makes the new UI appear to
+    switch phones in batches.  This hub restores the legacy behavior without
+    starting video: connections are prepared during discovery and a wake/lock
+    packet is queued to every ready channel in one event-loop turn.
+    """
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_ready = threading.Event()
+        self._desired: set[str] = set()
+        self._channels: dict[str, _PersistentChannel] = {}
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            name="xinglan-action-hub",
+            daemon=True,
+        )
+        self._thread.start()
+        self._loop_ready.wait(timeout=2.0)
+
+    def _thread_main(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._loop_ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+
+    def update_devices(self, udids: Iterable[str]) -> None:
+        loop = self._loop
+        if self._closed or loop is None or not loop.is_running():
+            return
+        desired = set(dict.fromkeys(udids))
+        asyncio.run_coroutine_threadsafe(self._update_devices(desired), loop)
+
+    async def _update_devices(self, desired: set[str]) -> None:
+        self._desired = desired
+        removed = set(self._tasks) - desired
+        for udid in removed:
+            task = self._tasks.pop(udid)
+            task.cancel()
+            self._channels.pop(udid, None)
+        for udid in desired - set(self._tasks):
+            channel = _PersistentChannel(asyncio.Queue(maxsize=8), asyncio.Event())
+            self._channels[udid] = channel
+            self._tasks[udid] = asyncio.create_task(
+                self._supervise_channel(udid, channel)
+            )
+
+    @staticmethod
+    def _next_sequence(sequence: int) -> int:
+        sequence = (sequence + 1) & 0xFFFFFFFF
+        return sequence or 1
+
+    async def _supervise_channel(
+        self,
+        udid: str,
+        channel: _PersistentChannel,
+    ) -> None:
+        delay = 0.2
+        pending: _QueuedAction | None = None
+        while udid in self._desired:
+            connection: Any | None = None
+            sequence = 0
+            try:
+                connection = await asyncio.wait_for(
+                    ServiceConnection.create_using_usbmux(
+                        udid,
+                        CONTROL_PORT,
+                        connection_type="USB",
+                    ),
+                    timeout=3.0,
+                )
+                sequence = self._next_sequence(sequence)
+                await connection.sendall(pack_hello(CONTROL_MAGIC, sequence))
+                header, payload = await _read_message(connection, 2.0)
+                if header.message_type != MessageType.HELLO_ACK:
+                    raise ValueError("control hello rejected")
+                unpack_hello(payload)
+                channel.ready.set()
+                delay = 0.2
+                while udid in self._desired:
+                    if pending is None:
+                        try:
+                            pending = await asyncio.wait_for(channel.queue.get(), 2.0)
+                        except asyncio.TimeoutError:
+                            sequence = self._next_sequence(sequence)
+                            await connection.sendall(
+                                pack_ping(CONTROL_MAGIC, sequence, int(time.monotonic() * 1000))
+                            )
+                            pong, _ = await _read_message(connection, 1.5)
+                            if pong.message_type != MessageType.PONG:
+                                raise ValueError("control heartbeat rejected")
+                            continue
+
+                    system_action = ACTION_MAP.get(pending.action)
+                    if system_action is None:
+                        if not pending.result.done():
+                            pending.result.set_result(False)
+                        pending = None
+                        continue
+                    sequence = self._next_sequence(sequence)
+                    # All channel workers become runnable together.  The
+                    # phone acts as soon as this packet arrives; ACK waiting
+                    # happens only after dispatch and does not stagger screens.
+                    await connection.sendall(pack_system_action(system_action, sequence))
+                    ack_header, ack_payload = await _read_message(connection, 2.0)
+                    accepted = False
+                    if ack_header.message_type == MessageType.ACK:
+                        acknowledgement = unpack_ack(ack_payload)
+                        accepted = (
+                            acknowledgement.acknowledged_sequence == sequence
+                            and acknowledgement.result_code == 0
+                        )
+                    if not pending.result.done():
+                        pending.result.set_result(accepted)
+                    pending = None
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                channel.ready.clear()
+                if pending is not None and not pending.result.done():
+                    pending.result.set_result(False)
+                pending = None
+                await asyncio.sleep(delay)
+                delay = min(2.0, delay * 1.6)
+            finally:
+                channel.ready.clear()
+                if connection is not None:
+                    try:
+                        await connection.close()
+                    except Exception:
+                        pass
+
+    def broadcast(self, udids: Iterable[str], action: str) -> Future[dict[str, bool]]:
+        loop = self._loop
+        ordered = list(dict.fromkeys(udids))
+        if self._closed or loop is None or not loop.is_running():
+            failed: Future[dict[str, bool]] = Future()
+            failed.set_result({udid: False for udid in ordered})
+            return failed
+        return asyncio.run_coroutine_threadsafe(
+            self._broadcast(ordered, action),
+            loop,
+        )
+
+    async def _broadcast(self, udids: list[str], action: str) -> dict[str, bool]:
+        async def send_one(udid: str) -> bool:
+            channel = self._channels.get(udid)
+            if channel is None:
+                return await send_device_action(udid, action)
+            try:
+                await asyncio.wait_for(channel.ready.wait(), timeout=0.8)
+            except asyncio.TimeoutError:
+                return await send_device_action(udid, action)
+            result = asyncio.get_running_loop().create_future()
+            try:
+                channel.queue.put_nowait(_QueuedAction(action, result))
+            except asyncio.QueueFull:
+                return False
+            try:
+                return await asyncio.wait_for(result, timeout=3.0)
+            except asyncio.TimeoutError:
+                return False
+
+        results = await asyncio.gather(
+            *(send_one(udid) for udid in udids),
+            return_exceptions=True,
+        )
+        return {
+            udid: bool(result) if not isinstance(result, BaseException) else False
+            for udid, result in zip(udids, results)
+        }
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+
+        async def shutdown() -> None:
+            self._desired.clear()
+            tasks = list(self._tasks.values())
+            self._tasks.clear()
+            self._channels.clear()
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        future = asyncio.run_coroutine_threadsafe(shutdown(), loop)
+        try:
+            future.result(timeout=2.0)
+        except Exception:
+            pass
+        loop.call_soon_threadsafe(loop.stop)
+        self._thread.join(timeout=2.0)
 
 
 async def identify_physical_device(udid: str) -> bool:
