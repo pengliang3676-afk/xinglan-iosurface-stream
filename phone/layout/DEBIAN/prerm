@@ -1,15 +1,7 @@
 #!/bin/sh
 
-if [ -x /Applications/XLStream.app/XLStreamLauncher ]; then
-    PREFIX=""
-else
-    PREFIX="/var/jb"
-fi
-PLIST="${PREFIX}/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
-(
-    launchctl bootout system/com.jibeib.xlstreamd >/dev/null 2>&1 || \
-        launchctl unload "$PLIST" >/dev/null 2>&1 || true
-    killall XLStreamLauncher >/dev/null 2>&1 || true
-    killall xlstreamd >/dev/null 2>&1 || true
-) </dev/null >/dev/null 2>&1 &
+# Never call launchctl from dpkg.  On some RootHide devices bootout/unload
+# blocks indefinitely and leaves both dpkg and apt locked.
+killall XLStreamLauncher >/dev/null 2>&1 || true
+killall xlstreamd >/dev/null 2>&1 || true
 exit 0

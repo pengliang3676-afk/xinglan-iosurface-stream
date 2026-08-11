@@ -5,18 +5,13 @@ if [ -x /Applications/XLStream.app/XLStreamLauncher ]; then
 else
     PREFIX="/var/jb"
 fi
-PLIST="${PREFIX}/Library/LaunchDaemons/com.jibeib.xlstreamd.plist"
 APP="${PREFIX}/Applications/XLStream.app"
 chown -R root:wheel "$APP" >/dev/null 2>&1 || true
 chmod 755 "$APP" "$APP/XLStreamLauncher" "$APP/bin" "$APP/bin/xlstreamd" >/dev/null 2>&1 || true
-# Never make dpkg/Sileo wait for launchd.  All descriptors are detached so a
-# broken launchd state cannot keep the package transaction open.
-(
-    launchctl bootout system/com.jibeib.xlstreamd >/dev/null 2>&1 || true
-    killall XLStreamLauncher >/dev/null 2>&1 || true
-    killall xlstreamd >/dev/null 2>&1 || true
-    sleep 1
-    launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || \
-        launchctl load "$PLIST" >/dev/null 2>&1 || true
-) </dev/null >/dev/null 2>&1 &
+# RootHide can leave launchctl bootout/bootstrap blocked forever.  Package
+# scripts must never call launchctl.  On upgrades the already-loaded KeepAlive
+# job restarts the new binary after these signals.  A first installation is
+# activated by a userspace reboot or by opening XLStream once.
+killall XLStreamLauncher >/dev/null 2>&1 || true
+killall xlstreamd >/dev/null 2>&1 || true
 exit 0
