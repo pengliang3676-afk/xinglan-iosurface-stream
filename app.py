@@ -874,13 +874,13 @@ class XinglanApp:
                 row=row_index,
                 column=0,
                 sticky="nsew",
-                padx=8,
+                padx=2,
                 pady=1,
             )
             return row
 
         group_row = tk.Frame(self.controls, bg="#101828")
-        group_row.grid(row=0, column=0, sticky="nsew", padx=8, pady=(2, 1))
+        group_row.grid(row=0, column=0, sticky="nsew", padx=2, pady=(2, 1))
         self.group_var = tk.StringVar(value="第1组")
         self.group_combo = tk.Menubutton(
             group_row,
@@ -911,7 +911,7 @@ class XinglanApp:
             font=("Microsoft YaHei UI", 10),
         )
         self.group_combo.configure(menu=self.group_menu)
-        self.group_combo.pack(side="left", fill="y", padx=(0, 7))
+        self.group_combo.pack(side="left", fill="y", padx=(0, 2))
         self._set_group_menu_values(["第1组"])
         self.group_button = tk.Button(
             group_row, text="连接本组", command=self.toggle_current_group,
@@ -939,7 +939,7 @@ class XinglanApp:
                 side="left",
                 fill="both",
                 expand=True,
-                padx=(0 if index == 0 else 4, 0 if index == 2 else 4),
+                padx=(0 if index == 0 else 1, 0 if index == 2 else 1),
             )
 
         file_row = fixed_row(self.controls, 2)
@@ -950,19 +950,19 @@ class XinglanApp:
         ).pack(fill="both", expand=True)
 
         mode_row = tk.Frame(self.controls, bg="#101828")
-        mode_row.grid(row=3, column=0, sticky="nsew", padx=8, pady=(1, 2))
+        mode_row.grid(row=3, column=0, sticky="nsew", padx=2, pady=(1, 2))
         tk.Button(
             mode_row, text="全部投屏",
             command=self.start_current_group,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
             font=("Microsoft YaHei UI", 10),
-        ).pack(side="left", fill="both", expand=True, padx=(0, 4))
+        ).pack(side="left", fill="both", expand=True, padx=(0, 1))
         tk.Button(
             mode_row, text="全部停屏",
             command=self.stop_current_group,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
             font=("Microsoft YaHei UI", 10),
-        ).pack(side="left", fill="both", expand=True, padx=(4, 0))
+        ).pack(side="left", fill="both", expand=True, padx=(1, 0))
 
     def _announce(self, text: str) -> None:
         self.summary.set(text)
