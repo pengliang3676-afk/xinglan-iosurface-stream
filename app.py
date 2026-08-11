@@ -801,7 +801,12 @@ class XinglanApp:
         self.right_panel.pack(side="right", fill="y", padx=(7, 0))
         self.right_panel.pack_propagate(False)
         self.right_panel.grid_columnconfigure(0, weight=1)
-        self.right_panel.grid_rowconfigure(1, weight=1)
+        # Keep the master canvas at the exact iPhone aspect-ratio height so the
+        # image starts immediately below the toolbar instead of being centred
+        # between two black letterbox bands.  All remaining vertical space is
+        # deliberately handed to the action area below it.
+        self.right_panel.grid_rowconfigure(1, weight=0)
+        self.right_panel.grid_rowconfigure(2, weight=1)
         self.master_toolbar = tk.Frame(
             self.right_panel, height=34, bg="#050a11",
             highlightthickness=1, highlightbackground="#344054",
@@ -856,18 +861,15 @@ class XinglanApp:
     def _build_right_controls(self) -> None:
         """Build the right-side controls in the same order as the StarLan web UI."""
         self.controls = tk.Frame(self.right_panel, bg="#101828")
-        self.controls.grid(row=2, column=0, sticky="ew")
+        self.controls.grid(row=2, column=0, sticky="nsew")
 
         def fixed_row(parent: tk.Widget, *, bottom: int = 4) -> tk.Frame:
-            row = tk.Frame(parent, bg="#101828", height=44)
-            row.pack(fill="x", padx=8, pady=(4, bottom))
-            row.pack_propagate(False)
+            row = tk.Frame(parent, bg="#101828")
+            row.pack(fill="both", expand=True, padx=8, pady=(4, bottom))
             return row
 
         group_row = tk.Frame(self.controls, bg="#101828")
-        group_row.configure(height=44)
-        group_row.pack(fill="x", padx=8, pady=(8, 4))
-        group_row.pack_propagate(False)
+        group_row.pack(fill="both", expand=True, padx=8, pady=(8, 4))
         self.group_var = tk.StringVar(value="第1组")
         self.group_combo = tk.Menubutton(
             group_row,
@@ -936,9 +938,8 @@ class XinglanApp:
             font=("Microsoft YaHei UI", 10),
         ).pack(fill="both", expand=True)
 
-        mode_row = tk.Frame(self.controls, bg="#101828", height=44)
-        mode_row.pack(fill="x", padx=8, pady=(4, 8))
-        mode_row.pack_propagate(False)
+        mode_row = tk.Frame(self.controls, bg="#101828")
+        mode_row.pack(fill="both", expand=True, padx=8, pady=(4, 8))
         tk.Button(
             mode_row, text="全部投屏",
             command=self.start_current_group,
