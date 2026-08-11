@@ -9,6 +9,7 @@ from typing import Any
 
 
 IDLE_EXIT_MS = 8000
+IME_WINDOW_ALPHA = 0.0
 
 
 def emit(kind: str, *values: Any) -> None:
@@ -32,6 +33,9 @@ def run_worker(screen_x: int, screen_y: int) -> None:
     root.withdraw()
     root.overrideredirect(True)
     root.attributes("-topmost", True)
+    # The helper must own keyboard focus so Windows IME can compose text, but
+    # its 2x2 native window must never be visible over the projected phone.
+    root.attributes("-alpha", IME_WINDOW_ALPHA)
     root.geometry(f"2x2+{max(1, screen_x)}+{max(1, screen_y)}")
 
     value = tk.StringVar(value="")
