@@ -863,13 +863,13 @@ class XinglanApp:
         self.controls = tk.Frame(self.right_panel, bg="#101828")
         self.controls.grid(row=2, column=0, sticky="nsew")
 
-        def fixed_row(parent: tk.Widget, *, bottom: int = 4) -> tk.Frame:
+        def fixed_row(parent: tk.Widget, *, bottom: int = 1) -> tk.Frame:
             row = tk.Frame(parent, bg="#101828")
-            row.pack(fill="both", expand=True, padx=8, pady=(4, bottom))
+            row.pack(fill="both", expand=True, padx=8, pady=(1, bottom))
             return row
 
         group_row = tk.Frame(self.controls, bg="#101828")
-        group_row.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        group_row.pack(fill="both", expand=True, padx=8, pady=(2, 1))
         self.group_var = tk.StringVar(value="第1组")
         self.group_combo = tk.Menubutton(
             group_row,
@@ -939,7 +939,7 @@ class XinglanApp:
         ).pack(fill="both", expand=True)
 
         mode_row = tk.Frame(self.controls, bg="#101828")
-        mode_row.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        mode_row.pack(fill="both", expand=True, padx=8, pady=(1, 2))
         tk.Button(
             mode_row, text="全部投屏",
             command=self.start_current_group,
