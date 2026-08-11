@@ -912,17 +912,29 @@ class XinglanApp:
 
         # 键盘输入由独立的轻量IME进程接收；它不加载投屏或分组代码。
 
-        for text, command in (
-            ("切换窗口", self.switch_window),
-            ("返回主屏", lambda: self.route_system_action(SystemAction.HOME)),
-            ("文件传输", self.open_file_transfer),
-        ):
-            row = fixed_row(self.controls)
+        shortcut_row = fixed_row(self.controls)
+        for index, (text, command) in enumerate((
+            ("主屏", lambda: self.route_system_action(SystemAction.HOME)),
+            ("切换", self.switch_window),
+            ("控制", lambda: self.route_system_action(SystemAction.CONTROL_CENTER)),
+        )):
             tk.Button(
-                row, text=text, command=command,
+                shortcut_row, text=text, command=command,
                 bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
                 font=("Microsoft YaHei UI", 10),
-            ).pack(fill="both", expand=True)
+            ).pack(
+                side="left",
+                fill="both",
+                expand=True,
+                padx=(0 if index == 0 else 4, 0 if index == 2 else 4),
+            )
+
+        file_row = fixed_row(self.controls)
+        tk.Button(
+            file_row, text="文件传输", command=self.open_file_transfer,
+            bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(fill="both", expand=True)
 
         mode_row = tk.Frame(self.controls, bg="#101828", height=44)
         mode_row.pack(fill="x", padx=8, pady=(4, 8))
