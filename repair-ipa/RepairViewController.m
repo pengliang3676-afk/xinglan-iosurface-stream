@@ -29,9 +29,19 @@ static int XLSpawnRootSelf(NSString **output)
 
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
-    posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-    posix_spawnattr_set_persona_uid_np(&attr, 0);
-    posix_spawnattr_set_persona_gid_np(&attr, 0);
+    int personaError = posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+    int uidError = posix_spawnattr_set_persona_uid_np(&attr, 0);
+    int gidError = posix_spawnattr_set_persona_gid_np(&attr, 0);
+    if (personaError != 0 || uidError != 0 || gidError != 0) {
+        posix_spawnattr_destroy(&attr);
+        close(pipeFD[0]);
+        close(pipeFD[1]);
+        if (output) {
+            *output = [NSString stringWithFormat:@"PERSONA_SETUP_FAILED persona=%d uid=%d gid=%d\n",
+                       personaError, uidError, gidError];
+        }
+        return 32;
+    }
 
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -78,7 +88,7 @@ static int XLSpawnRootSelf(NSString **output)
 
     UILabel *title = [UILabel new];
     title.translatesAutoresizingMaskIntoConstraints = NO;
-    title.text = @"XLStream RootHide ??";
+    title.text = @"XLStream RootHide Repair";
     title.textColor = UIColor.whiteColor;
     title.font = [UIFont boldSystemFontOfSize:25];
     title.textAlignment = NSTextAlignmentCenter;
@@ -86,7 +96,7 @@ static int XLSpawnRootSelf(NSString **output)
 
     self.stateLabel = [UILabel new];
     self.stateLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.stateLabel.text = @"?????? dpkg ????\n????????????";
+    self.stateLabel.text = @"Repairs only the broken dpkg scripts.\nOther tweaks and jailbreak files are not changed.";
     self.stateLabel.textColor = [UIColor colorWithWhite:0.85 alpha:1.0];
     self.stateLabel.font = [UIFont systemFontOfSize:16];
     self.stateLabel.numberOfLines = 0;
@@ -100,13 +110,13 @@ static int XLSpawnRootSelf(NSString **output)
     self.logView.textColor = [UIColor colorWithWhite:0.82 alpha:1.0];
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     self.logView.layer.cornerRadius = 10;
-    self.logView.text = @"??????????????????";
+    self.logView.text = @"Tap the button below. A backup is created before repair.";
     [self.view addSubview:self.logView];
 
     self.repairButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.repairButton.translatesAutoresizingMaskIntoConstraints = NO;
     self.repairButton.backgroundColor = [UIColor colorWithRed:0.08 green:0.72 blue:0.43 alpha:1.0];
-    [self.repairButton setTitle:@"??????" forState:UIControlStateNormal];
+    [self.repairButton setTitle:@"Start Safe Repair" forState:UIControlStateNormal];
     [self.repairButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     self.repairButton.titleLabel.font = [UIFont boldSystemFontOfSize:18];
     self.repairButton.layer.cornerRadius = 10;
@@ -135,20 +145,20 @@ static int XLSpawnRootSelf(NSString **output)
 - (void)runRepair
 {
     self.repairButton.enabled = NO;
-    self.stateLabel.text = @"????????";
-    self.logView.text = @"???? RootHide ?????";
+    self.stateLabel.text = @"Checking and repairing...";
+    self.logView.text = @"Requesting RootHide repair privileges...";
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *output = nil;
         int result = XLSpawnRootSelf(&output);
         dispatch_async(dispatch_get_main_queue(), ^{
-            self.logView.text = output.length ? output : [NSString stringWithFormat:@"?????????? %d?", result];
+            self.logView.text = output.length ? output : [NSString stringWithFormat:@"No repair log was returned (code %d).", result];
             if (result == 0 && [output containsString:@"RESULT_OK"]) {
-                self.stateLabel.text = @"????\n????? XLStream 0.5.5 RootHide ?";
+                self.stateLabel.text = @"Repair completed successfully.\nXLStream RootHide can now be reinstalled.";
                 self.stateLabel.textColor = [UIColor colorWithRed:0.25 green:0.95 blue:0.58 alpha:1.0];
-                [self.repairButton setTitle:@"???" forState:UIControlStateDisabled];
+                [self.repairButton setTitle:@"Repaired" forState:UIControlStateDisabled];
             } else {
-                self.stateLabel.text = [NSString stringWithFormat:@"???????? %d?\n????????????", result];
+                self.stateLabel.text = [NSString stringWithFormat:@"Repair did not complete (code %d).\nNo file is changed when validation fails.", result];
                 self.stateLabel.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.35 alpha:1.0];
                 self.repairButton.enabled = YES;
             }

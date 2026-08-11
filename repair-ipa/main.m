@@ -49,6 +49,16 @@ static int XLRepairMain(void)
 {
     @autoreleasepool {
         NSFileManager *fm = NSFileManager.defaultManager;
+        NSMutableString *report = [NSMutableString string];
+        [report appendFormat:@"CREDENTIAL uid=%u euid=%u gid=%u egid=%u\n",
+         (unsigned)getuid(), (unsigned)geteuid(), (unsigned)getgid(), (unsigned)getegid()];
+        if (geteuid() != 0) {
+            [report appendString:@"RESULT_NOT_ROOT\n"];
+            fputs(report.UTF8String, stdout);
+            fflush(stdout);
+            return 21;
+        }
+
         NSMutableOrderedSet<NSString *> *roots = [NSMutableOrderedSet orderedSet];
         NSString *containerRoot = @"/private/var/containers/Bundle/Application";
         NSError *listError = nil;
@@ -61,7 +71,6 @@ static int XLRepairMain(void)
         [roots addObject:@"/"];
         [roots addObject:@"/var/jb"];
 
-        NSMutableString *report = [NSMutableString string];
         if (listError) {
             [report appendFormat:@"SCAN_WARNING %@\n", listError.localizedDescription];
         }
