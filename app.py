@@ -749,7 +749,7 @@ class XinglanApp:
         self.health_tick = 0
         self._scan_in_progress = False
         self._closing = False
-        root.title("星澜 USB 原生群控 · 新版测试")
+        root.title("")
         root.configure(bg="#0b1220")
         root.geometry("1280x900")
         try:
@@ -769,11 +769,6 @@ class XinglanApp:
         toolbar = tk.Frame(root, bg="#1d2939", height=TOP_BAR_HEIGHT)
         toolbar.pack(fill="x", padx=10, pady=(2, 2))
         toolbar.pack_propagate(False)
-        tk.Label(
-            toolbar, text="星澜 USB 原生群控", bg="#1d2939", fg="white",
-            font=("Microsoft YaHei UI", 18, "bold")
-        ).place(x=12, y=0, height=TOP_BAR_HEIGHT)
-
         # 四个顶部按钮与右侧主控栏共用同一条左右边界。
         # 这样“全部开屏”的左边缘会和下方“全选”严格对齐。
         top_actions = tk.Frame(toolbar, bg="#1d2939")
