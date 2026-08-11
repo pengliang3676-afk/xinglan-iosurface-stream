@@ -16,7 +16,7 @@ from xinglan.bootstrap import PROJECT_DIR, configure_dependencies
 
 configure_dependencies()
 
-from PIL import Image, ImageDraw, ImageTk  # noqa: E402
+from PIL import Image, ImageDraw, ImageFont, ImageTk  # noqa: E402
 
 from xinglan.device_discovery import discover_usb_udids_stable  # noqa: E402
 from xinglan.device_actions import (  # noqa: E402
@@ -50,6 +50,24 @@ SIDE_RAIL_WIDTH = 44
 WALL_GAP = 3
 DISPLAY_INTERVAL_MS = 80
 LOGGER = logging.getLogger("xinglan.app")
+
+
+def load_placeholder_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Load a Windows font that can render the Chinese connection message."""
+    windows_dir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    for filename in ("msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc"):
+        font_path = windows_dir / "Fonts" / filename
+        if not font_path.is_file():
+            continue
+        try:
+            return ImageFont.truetype(str(font_path), size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+SMALL_PLACEHOLDER_FONT = load_placeholder_font(13)
+MASTER_PLACEHOLDER_FONT = load_placeholder_font(15)
 
 
 def make_checkbox_icon(master: tk.Misc, size: int, checked: bool) -> ImageTk.PhotoImage:
@@ -348,6 +366,7 @@ class DeviceTile:
             text,
             fill="#98a2b3",
             anchor="mm",
+            font=SMALL_PLACEHOLDER_FONT,
         )
         self._set_photo(image)
 
@@ -600,7 +619,13 @@ class MasterView:
         self.render_size = (width, height)
         image = Image.new("RGB", (width, height), "#050a11")
         draw = ImageDraw.Draw(image)
-        draw.text((width // 2, height // 2), text, fill="#98a2b3", anchor="mm")
+        draw.text(
+            (width // 2, height // 2),
+            text,
+            fill="#98a2b3",
+            anchor="mm",
+            font=MASTER_PLACEHOLDER_FONT,
+        )
         self._set_photo(image)
 
     def _set_photo(self, image: Image.Image) -> None:
