@@ -17,9 +17,13 @@ from xinglan.control_protocol import (
 )
 from xinglan.device_actions import (
     ACTION_MAP,
+    LEGACY_COMMAND_BYTES,
+    LEGACY_CONTROL_PORT,
     identify_physical_device,
     send_action_to_devices,
     send_device_action,
+    send_legacy_action_to_devices,
+    send_legacy_device_action,
 )
 
 
@@ -102,6 +106,36 @@ class DeviceActionTests(unittest.TestCase):
 
         self.assertEqual(result, {"a": True, "b": True})
         self.assertEqual(sender.await_count, 2)
+
+    def test_legacy_top_buttons_use_exact_old_port_and_payloads(self) -> None:
+        for action, payload in (("wake", b"14\r\n"), ("sleep", b"15\r\n")):
+            with self.subTest(action=action):
+                connection = FakeConnection()
+                create = AsyncMock(return_value=connection)
+                with patch(
+                    "xinglan.device_actions.ServiceConnection.create_using_usbmux",
+                    new=create,
+                ):
+                    result = asyncio.run(send_legacy_device_action("device-01", action))
+
+                self.assertTrue(result)
+                self.assertEqual(6000, LEGACY_CONTROL_PORT)
+                self.assertEqual(payload, LEGACY_COMMAND_BYTES[action])
+                create.assert_awaited_once_with(
+                    "device-01", 6000, connection_type="USB"
+                )
+                self.assertEqual([payload], connection.payloads)
+                self.assertTrue(connection.closed)
+
+    def test_legacy_top_buttons_broadcast_to_all_phones_together(self) -> None:
+        sender = AsyncMock(return_value=True)
+        with patch("xinglan.device_actions.send_legacy_device_action", new=sender):
+            result = asyncio.run(
+                send_legacy_action_to_devices(["a", "b", "a", "c"], "wake")
+            )
+
+        self.assertEqual(result, {"a": True, "b": True, "c": True})
+        self.assertEqual(sender.await_count, 3)
 
     def test_identify_sleeps_then_wakes_phone_once(self) -> None:
         sender = AsyncMock(return_value=True)

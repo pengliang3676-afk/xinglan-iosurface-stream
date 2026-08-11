@@ -21,11 +21,11 @@ from PIL import Image, ImageDraw, ImageTk  # noqa: E402
 from xinglan.device_discovery import discover_usb_udids_stable  # noqa: E402
 from xinglan.device_actions import (  # noqa: E402
     identify_physical_device,
-    send_action_to_devices,
+    send_legacy_action_to_devices,
 )
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
-from xinglan.ime_bridge import ImeBridgeClient  # noqa: E402
+from xinglan.keyboard_input import map_keypress  # noqa: E402
 from xinglan.diagnostics import (  # noqa: E402
     ProcessLoadSampler,
     StabilityMonitor,
@@ -45,10 +45,43 @@ MASTER_VIEW_SIZE = (356, 633)
 TOP_BAR_HEIGHT = 64
 RIGHT_PANEL_WIDTH = 360
 PHONE_HEAD_HEIGHT = 20
-SIDE_RAIL_WIDTH = 36
+SIDE_RAIL_WIDTH = 44
 WALL_GAP = 3
 DISPLAY_INTERVAL_MS = 80
 LOGGER = logging.getLogger("xinglan.app")
+
+
+def make_checkbox_icon(master: tk.Misc, size: int, checked: bool) -> ImageTk.PhotoImage:
+    """Create a scalable green checkbox instead of the fixed Windows indicator."""
+    scale = 3
+    image = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    inset = 1 * scale
+    bounds = (inset, inset, size * scale - inset - 1, size * scale - inset - 1)
+    green = "#12b76a"
+    draw.rounded_rectangle(
+        bounds,
+        radius=3 * scale,
+        fill=green if checked else None,
+        outline=green,
+        width=2 * scale,
+    )
+    if checked:
+        draw.line(
+            (
+                4 * scale,
+                10 * scale,
+                8 * scale,
+                14 * scale,
+                16 * scale,
+                6 * scale,
+            ),
+            fill="white",
+            width=2 * scale,
+            joint="curve",
+        )
+    image = image.resize((size, size), Image.Resampling.LANCZOS)
+    return ImageTk.PhotoImage(image, master=master)
 
 
 class DeviceTile:
@@ -97,7 +130,7 @@ class DeviceTile:
         self.title.pack(fill="both", expand=True, padx=4)
         self.canvas = tk.Canvas(
             self.frame, width=tile_width, height=tile_height, bg="#050a11",
-            highlightthickness=0, cursor="arrow"
+            highlightthickness=0, cursor="arrow", takefocus=True,
         )
         self.canvas.place(
             x=0,
@@ -119,29 +152,31 @@ class DeviceTile:
         self.selected_var = tk.BooleanVar(
             value=self.owner.is_device_selected(self.session.udid)
         )
-        self.selection_check = tk.Checkbutton(
+        self.selection_icons = {
+            False: make_checkbox_icon(self.side, 20, False),
+            True: make_checkbox_icon(self.side, 20, True),
+        }
+        self.selection_check = tk.Button(
             self.side,
-            variable=self.selected_var,
-            command=lambda: self.owner.set_device_selected(
-                self.session.udid, self.selected_var.get()
-            ),
+            image=self.selection_icons[self.selected_var.get()],
+            command=self._toggle_selection,
             bg="#111827",
             fg="white",
             activebackground="#111827",
             activeforeground="white",
-            selectcolor="#2e90fa",
+            relief="flat",
             borderwidth=0,
             highlightthickness=0,
             padx=0,
             pady=0,
         )
-        self.selection_check.pack(pady=(4, 0))
+        self.selection_check.pack(pady=(1, 0))
         tk.Label(
             self.side,
             text=f"{index + 1:02d}",
             bg="#111827",
             fg="white",
-            font=("Microsoft YaHei UI", 8, "bold"),
+            font=("Microsoft YaHei UI", 10, "bold"),
         ).pack(pady=(0, 6))
         self.master_button = tk.Button(
             self.side,
@@ -184,10 +219,22 @@ class DeviceTile:
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._move)
         self.canvas.bind("<ButtonRelease-1>", self._release)
+        self.canvas.bind("<Control-v>", self._paste)
+        self.canvas.bind("<Control-V>", self._paste)
+        self.canvas.bind("<KeyPress>", self._key_press)
         self.set_connected(self.owner.is_session_active(self.session.udid))
         self._show_placeholder(
             "正在连接" if self.owner.is_session_active(self.session.udid) else "等待手动投屏"
         )
+
+    def _toggle_selection(self) -> None:
+        selected = not self.selected_var.get()
+        self.set_selected(selected)
+        self.owner.set_device_selected(self.session.udid, selected)
+
+    def set_selected(self, selected: bool) -> None:
+        self.selected_var.set(selected)
+        self.selection_check.configure(image=self.selection_icons[selected])
 
     def grid(self, row: int, column: int) -> None:
         self.frame.grid(
@@ -289,12 +336,23 @@ class DeviceTile:
         return (event.x - left) / (right - left), (event.y - top) / (bottom - top)
 
     def _press(self, event: tk.Event) -> None:
+        self.canvas.focus_set()
         point = self._normalized(event)
         if point is None:
             return
-        self.owner.activate_keyboard_capture(event.x_root, event.y_root)
         self.dragging = True
         self.owner.route_touch(self.session, 1, *point, from_master=False)
+
+    def _key_press(self, event: tk.Event) -> str | None:
+        if event.state & 0x0004 and event.keysym.lower() == "v":
+            return self._paste(event)
+        return self.owner.route_keypress(
+            self.session, event.keysym, event.char, from_master=False
+        )
+
+    def _paste(self, _event: tk.Event) -> str:
+        self.owner.route_clipboard_paste(self.session, from_master=False)
+        return "break"
 
     def _move(self, event: tk.Event) -> None:
         if not self.dragging:
@@ -421,6 +479,7 @@ class MasterView:
             bg="black",
             highlightthickness=0,
             cursor="arrow",
+            takefocus=True,
         )
         self.canvas.pack(fill="both", expand=True)
         self.image_item = self.canvas.create_image(0, 0, anchor="nw")
@@ -436,6 +495,9 @@ class MasterView:
         self.canvas.bind("<B1-Motion>", self._move)
         self.canvas.bind("<ButtonRelease-1>", self._release)
         self.canvas.bind("<Configure>", self._canvas_resized)
+        self.canvas.bind("<Control-v>", self._paste)
+        self.canvas.bind("<Control-V>", self._paste)
+        self.canvas.bind("<KeyPress>", self._key_press)
         self._show_placeholder("请选择主控手机")
 
     def set_session(self, session: DeviceSession | None) -> None:
@@ -525,12 +587,26 @@ class MasterView:
     def _press(self, event: tk.Event) -> None:
         if self.session is None:
             return
+        self.canvas.focus_set()
         point = self._normalized(event)
         if point is None:
             return
-        self.owner.activate_keyboard_capture(event.x_root, event.y_root)
         self.dragging = True
         self.owner.route_touch(self.session, 1, *point, from_master=True)
+
+    def _key_press(self, event: tk.Event) -> str | None:
+        if self.session is None:
+            return None
+        if event.state & 0x0004 and event.keysym.lower() == "v":
+            return self._paste(event)
+        return self.owner.route_keypress(
+            self.session, event.keysym, event.char, from_master=True
+        )
+
+    def _paste(self, _event: tk.Event) -> str:
+        if self.session is not None:
+            self.owner.route_clipboard_paste(self.session, from_master=True)
+        return "break"
 
     def _move(self, event: tk.Event) -> None:
         if not self.dragging or self.session is None:
@@ -587,10 +663,6 @@ class XinglanApp:
         self.health_tick = 0
         self._scan_in_progress = False
         self._closing = False
-        self._keyboard_pending = ""
-        self._keyboard_flush_job: str | None = None
-        self._keyboard_commit_count = 0
-
         root.title("星澜 USB 原生群控 · 新版测试")
         root.configure(bg="#0b1220")
         root.geometry("1280x900")
@@ -599,15 +671,6 @@ class XinglanApp:
         except tk.TclError:
             pass
         root.protocol("WM_DELETE_WINDOW", self.close)
-
-        # Windows IME composition runs in a disposable helper process.  This
-        # keeps Microsoft IME native caches out of the long-running projection
-        # process while preserving direct Chinese input and Ctrl+V.
-        self.ime_bridge = ImeBridgeClient(
-            root,
-            self._receive_ime_text,
-            self._receive_ime_key,
-        )
 
         # 严格复用旧版网页的 64px 顶栏和右侧 600px 操作区。
         toolbar = tk.Frame(root, bg="#1d2939", height=TOP_BAR_HEIGHT)
@@ -694,15 +757,22 @@ class XinglanApp:
             self.master_toolbar, text="全选", command=self.select_all_devices,
             bg="#2e90fa", fg="white", relief="flat", padx=8,
         ).pack(side="left", fill="y", padx=(5, 3), pady=3)
+        self.sync_icons = {
+            False: make_checkbox_icon(self.master_toolbar, 20, False),
+            True: make_checkbox_icon(self.master_toolbar, 20, True),
+        }
         self.sync_button = tk.Button(
             self.master_toolbar,
-            text="□ 同步群控",
+            text="同步群控",
+            image=self.sync_icons[False],
+            compound="left",
             command=self.toggle_sync_control,
             bg="#2e90fa",
             fg="white",
             activebackground="#1570ef",
             activeforeground="white",
             relief="flat",
+            font=("Microsoft YaHei UI", 12, "bold"),
         )
         self.sync_button.pack(side="left", fill="both", expand=True, padx=2, pady=3)
         tk.Button(
@@ -758,9 +828,7 @@ class XinglanApp:
         )
         self.group_button.pack(side="left", fill="both", expand=True)
 
-        # 中文输入后续由不可见的键盘接收器承载；右侧不再额外占两行，
-        # 以保持和旧版网页完全一致的主控画面高度。
-        self.text_input_var = tk.StringVar()
+        # 键盘事件由投屏画布直接接收，不创建输入框或常驻IME进程。
 
         for text, command in (
             ("切换窗口", self.switch_window),
@@ -789,72 +857,6 @@ class XinglanApp:
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
             font=("Microsoft YaHei UI", 10),
         ).pack(side="left", fill="both", expand=True, padx=(4, 0))
-
-    def activate_keyboard_capture(
-        self,
-        screen_x: int | None = None,
-        screen_y: int | None = None,
-    ) -> None:
-        """Route keyboard input and anchor the IME candidate by the click."""
-        if screen_x is None or screen_y is None:
-            return
-        self.ime_bridge.activate(screen_x, screen_y)
-
-    def _receive_ime_text(self, text: str) -> None:
-        if not text:
-            return
-        self._keyboard_pending += text
-        if self._keyboard_flush_job is not None:
-            self.root.after_cancel(self._keyboard_flush_job)
-        # Coalesce fast English typing while preserving a committed Chinese
-        # IME candidate as one Unicode payload.
-        self._keyboard_flush_job = self.root.after(45, self._flush_keyboard_text)
-
-    def _flush_keyboard_text(self) -> None:
-        self._keyboard_flush_job = None
-        text = self._keyboard_pending
-        self._keyboard_pending = ""
-        if text:
-            self._keyboard_commit_count += 1
-            LOGGER.info(
-                "keyboard commit batch=%s chars=%s bytes=%s memory=%.1fMB",
-                self._keyboard_commit_count,
-                len(text),
-                len(text.encode("utf-8")),
-                working_set_mb(),
-            )
-            self.send_text_input(text)
-
-    def _receive_ime_key(self, page: int, usage: int, label: str) -> None:
-        self._flush_keyboard_text()
-        self.send_key_event(page, usage, label)
-
-    def send_text_input(self, text: str | None = None) -> None:
-        if text is None:
-            text = self.text_input_var.get()
-        if not text:
-            self.summary.set("请输入要发送的文字")
-            return
-        targets = self._selected_control_udids()
-        if not targets:
-            self.summary.set("请先选择主控手机，或开启同步后勾选手机")
-            return
-        accepted = sum(
-            1 for udid in targets
-            if self.sessions[udid].send_text(text)
-        )
-        self.summary.set(f"文字已发送到 {accepted}/{len(targets)} 台手机")
-
-    def send_key_event(self, page: int, usage: int, label: str) -> None:
-        targets = self._selected_control_udids()
-        if not targets:
-            self.summary.set("请先选择主控手机，或开启同步后勾选手机")
-            return
-        accepted = sum(
-            1 for udid in targets
-            if self.sessions[udid].send_key(page, usage)
-        )
-        self.summary.set(f"{label}已发送到 {accepted}/{len(targets)} 台手机")
 
     def _announce(self, text: str) -> None:
         self.summary.set(text)
@@ -895,10 +897,10 @@ class XinglanApp:
             failed = len(result) - succeeded
             self.summary.set(f"{label}：成功 {succeeded} 台，失败 {failed} 台")
 
-        # 只在点击按钮时同时建立通道并并发发送，不再为60台手机长期
-        # 保留后台连接。这样未投屏设备不会持续重连或占用内存。
+        # 与旧浏览器版完全相同：并发连接手机 6000 端口，开屏发送
+        # ``14\r\n``，熄屏发送 ``15\r\n``，发送后立即关闭连接。
         self._run_async_action(
-            lambda: send_action_to_devices(udids, action),
+            lambda: send_legacy_action_to_devices(udids, action),
             completed,
         )
 
@@ -923,7 +925,7 @@ class XinglanApp:
     def toggle_sync_control(self) -> None:
         enabled = not self.sync_enabled.get()
         self.sync_enabled.set(enabled)
-        self.sync_button.configure(text="☑ 同步群控" if enabled else "□ 同步群控")
+        self.sync_button.configure(image=self.sync_icons[enabled])
         self.summary.set(f"同步群控已{'开启' if enabled else '关闭'}")
 
     def is_device_selected(self, udid: str) -> bool:
@@ -941,7 +943,7 @@ class XinglanApp:
 
     def _refresh_tile_selections(self) -> None:
         for udid, tile in self.tiles.items():
-            tile.selected_var.set(udid in self.selected_udids)
+            tile.set_selected(udid in self.selected_udids)
 
     def _selected_control_udids(self) -> list[str]:
         if self.sync_enabled.get():
@@ -1688,6 +1690,59 @@ class XinglanApp:
             sync_text = "开" if self.sync_enabled.get() and from_master else "关"
             self.summary.set(f"已向 {accepted}/{len(targets)} 台发送触摸 · 同步群控={sync_text}")
 
+    def _keyboard_targets(
+        self, source: DeviceSession, *, from_master: bool
+    ) -> list[DeviceSession]:
+        # 与鼠标路由保持一致：左侧小窗只控制本机，右侧主控才可同步。
+        if not (self.sync_enabled.get() and from_master):
+            return [source]
+        targets = [source]
+        targets.extend(
+            self.sessions[udid]
+            for udid in self._current_group_udids()
+            if udid != source.udid
+            and udid in self.active_udids
+            and udid in self.selected_udids
+        )
+        return targets
+
+    def route_keypress(
+        self,
+        source: DeviceSession,
+        keysym: str,
+        char: str,
+        *,
+        from_master: bool,
+    ) -> str | None:
+        stroke = map_keypress(keysym, char)
+        if stroke is None:
+            return "break"
+        targets = self._keyboard_targets(source, from_master=from_master)
+        accepted = sum(
+            1
+            for session in targets
+            if session.send_key(stroke.page, stroke.usage, stroke.modifiers)
+        )
+        # 正常打字不刷新状态文本，避免每个按键制造Tk字符串和界面抖动。
+        if accepted == 0:
+            self.summary.set("键盘输入未发送：请确认该手机正在投屏")
+        return "break"
+
+    def route_clipboard_paste(
+        self, source: DeviceSession, *, from_master: bool
+    ) -> None:
+        try:
+            text = self.root.clipboard_get()
+        except tk.TclError:
+            self.summary.set("电脑剪贴板里没有可粘贴的文字")
+            return
+        if not text:
+            self.summary.set("电脑剪贴板里没有可粘贴的文字")
+            return
+        targets = self._keyboard_targets(source, from_master=from_master)
+        accepted = sum(1 for session in targets if session.send_text(text))
+        self.summary.set(f"已向 {accepted}/{len(targets)} 台直接粘贴文字")
+
     def refresh_tiles(self) -> None:
         for tile in list(self.tiles.values()):
             tile.refresh()
@@ -1775,7 +1830,6 @@ class XinglanApp:
 
     def close(self) -> None:
         self._closing = True
-        self.ime_bridge.close()
         if (
             self.stability_monitor is not None
             and self.stability_monitor.sample_count

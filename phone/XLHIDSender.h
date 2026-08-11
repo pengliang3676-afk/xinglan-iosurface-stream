@@ -17,6 +17,9 @@
 - (BOOL)sendPowerButton;
 - (BOOL)sendAppSwitcher;
 - (BOOL)sendKeyboardPage:(uint32_t)page usage:(uint32_t)usage;
+- (BOOL)sendKeyboardPage:(uint32_t)page
+                   usage:(uint32_t)usage
+               modifiers:(XLKeyModifier)modifiers;
 - (BOOL)sendPasteShortcut;
 
 @end

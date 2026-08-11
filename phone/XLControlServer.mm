@@ -211,17 +211,16 @@ static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
     return XLPostPasteText(text) ? 0 : 4;
 }
 
-static uint32_t XLHandleKeyEvent(XLHIDSender *sender, const NSData *data) {
+static uint32_t XLHandleKeyEvent(
+    XLHIDSender *sender, const NSData *data, XLKeyModifier modifiers) {
     if (data.length != sizeof(XLKeyEventPayload)) return 2;
     XLKeyEventPayload payload = {};
     [data getBytes:&payload length:sizeof(payload)];
     uint32_t page = ntohl(payload.page);
     uint32_t usage = ntohl(payload.usage);
-    if (page == 0x07 && usage == 0x2A &&
-        notify_post(XLTextDeleteNotification) == NOTIFY_STATUS_OK) return 0;
-    if (page == 0x07 && usage == 0x28 &&
-        notify_post(XLTextReturnNotification) == NOTIFY_STATUS_OK) return 0;
-    return [sender sendKeyboardPage:page usage:usage] ? 0 : 4;
+    return [sender sendKeyboardPage:page
+                              usage:usage
+                          modifiers:(XLKeyModifier)(modifiers & 0x0F)] ? 0 : 4;
 }
 
 static int XLScreenIsOn(void) {
@@ -314,7 +313,8 @@ static void XLHandleControlClient(int client) {
                     break;
                 }
                 case XLMessageKeyEvent: {
-                    uint32_t result = XLHandleKeyEvent(sender, payload);
+                    uint32_t result = XLHandleKeyEvent(
+                        sender, payload, (XLKeyModifier)ntohs(header.flags));
                     if (result != 0) XLControlErrors.fetch_add(1);
                     if (!XLWriteAck(client, sequence, result)) return;
                     break;

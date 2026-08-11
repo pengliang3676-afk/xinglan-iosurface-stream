@@ -214,8 +214,10 @@ class DeviceSession:
             return False
         return self._enqueue_control(ControlEnvelope("text", text))
 
-    def send_key(self, page: int, usage: int) -> bool:
-        return self._enqueue_control(ControlEnvelope("key", KeyCommand(page, usage)))
+    def send_key(self, page: int, usage: int, modifiers: int = 0) -> bool:
+        return self._enqueue_control(
+            ControlEnvelope("key", KeyCommand(page, usage, modifiers))
+        )
 
     def request_keyframe(self) -> bool:
         return self._enqueue_control(ControlEnvelope("keyframe"))

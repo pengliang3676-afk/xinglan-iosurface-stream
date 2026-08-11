@@ -14,6 +14,7 @@ from xinglan.control_protocol import (
     HELLO,
     PROTOCOL_VERSION,
     KeyCommand,
+    KeyModifier,
     MessageType,
     SystemAction,
     TouchCommand,
@@ -93,7 +94,22 @@ class ControlProtocolTests(unittest.TestCase):
         key = pack_key_event(KeyCommand(0x07, 0x28), 52)
         key_header = unpack_header(key[:HEADER.size], CONTROL_MAGIC)
         self.assertEqual(MessageType.KEY_EVENT, key_header.message_type)
+        self.assertEqual(0, key_header.flags)
         self.assertEqual(b"\x00\x00\x00\x07\x00\x00\x00\x28", key[HEADER.size:])
+
+        shifted = pack_key_event(
+            KeyCommand(0x07, 0x04, int(KeyModifier.SHIFT)), 53
+        )
+        shifted_header = unpack_header(shifted[:HEADER.size], CONTROL_MAGIC)
+        self.assertEqual(int(KeyModifier.SHIFT), shifted_header.flags)
+        self.assertEqual(
+            b"\x00\x00\x00\x07\x00\x00\x00\x04",
+            shifted[HEADER.size:],
+        )
+
+    def test_key_event_rejects_unknown_modifier_bits(self) -> None:
+        with self.assertRaises(ValueError):
+            pack_key_event(KeyCommand(0x07, 0x04, 0x10), 54)
 
     def test_ack_round_trip(self) -> None:
         packet = pack_message(CONTROL_MAGIC, MessageType.ACK, 8, ACK.pack(7, 0))

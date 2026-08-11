@@ -14,15 +14,15 @@ class PhoneTextInputSourceTests(unittest.TestCase):
         self.assertIn("(ackState >> 1) == request", source)
         self.assertNotIn("XLPostTextScalars(text) ? 0", handler)
 
-    def test_foreground_tweak_reassembles_and_pastes_complete_text(self):
+    def test_foreground_tweak_reassembles_and_directly_inserts_complete_text(self):
         source = (ROOT / "phone" / "XLSystemActions.xm").read_text(encoding="utf-8")
         self.assertIn("XLTextPasteBeginNotification", source)
         self.assertIn("XLTextPasteChunkNotification", source)
         self.assertIn("XLTextPasteCommitNotification", source)
         self.assertIn("XLTextPasteAckNotification", source)
-        self.assertIn("UIPasteboard.generalPasteboard.string = text", source)
+        self.assertNotIn("UIPasteboard.generalPasteboard.string = text", source)
         self.assertIn("UIKeyboardImpl", source)
-        self.assertIn("XLInsertTextThroughKeyboard(text)", source)
+        self.assertIn("XLInsertTextIntoFocusedControl(text)", source)
         self.assertIn("XLPostPasteAck(request", source)
 
     def test_paste_shortcut_has_modifier_timing(self):
@@ -38,9 +38,9 @@ class PhoneTextInputSourceTests(unittest.TestCase):
         info = (ROOT / "phone" / "layout" / "Applications" / "XLStream.app" / "Info.plist").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Version: 0.5.2", control)
-        self.assertIn("<string>0.5.2</string>", info)
-        self.assertIn("<string>52</string>", info)
+        self.assertIn("Version: 0.5.3", control)
+        self.assertIn("<string>0.5.3</string>", info)
+        self.assertIn("<string>53</string>", info)
 
     def test_package_scripts_never_wait_for_launchctl(self):
         scripts = ROOT / "phone" / "layout" / "DEBIAN"

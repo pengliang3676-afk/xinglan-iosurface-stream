@@ -96,6 +96,13 @@ typedef struct {
     uint32_t usage;
 } XLKeyEventPayload;
 
+enum XLKeyModifier : uint16_t {
+    XLKeyModifierControl = 1 << 0,
+    XLKeyModifierShift = 1 << 1,
+    XLKeyModifierAlt = 1 << 2,
+    XLKeyModifierGUI = 1 << 3,
+};
+
 typedef struct {
     uint64_t monotonicMs;
 } XLPingPayload;

@@ -121,27 +121,10 @@ static BOOL XLDeleteFromFocusedControl(void) {
                                                forEvent:nil];
 }
 
-static BOOL XLPasteIntoFocusedControl(void) {
-    UIApplication *application = UIApplication.sharedApplication;
-    if (application.applicationState != UIApplicationStateActive) return NO;
-    UIResponder *responder = XLCurrentFirstResponder();
-    SEL selector = @selector(paste:);
-    if (responder && [responder respondsToSelector:selector]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(responder, selector, nil);
-        return YES;
-    }
-    return [application sendAction:selector to:nil from:nil forEvent:nil];
-}
-
 static BOOL XLCommitTextIntoFocusedControl(NSString *text) {
-    UIPasteboard.generalPasteboard.string = text;
-    if (XLInsertTextThroughKeyboard(text)) return YES;
-    UIResponder *responder = XLCurrentFirstResponder();
-    if (responder && [responder respondsToSelector:@selector(insertText:)]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(responder, @selector(insertText:), text);
-        return YES;
-    }
-    return XLPasteIntoFocusedControl();
+    // Direct insertion avoids iOS' paste permission prompt and keeps Ctrl+V
+    // independent from the phone clipboard.
+    return XLInsertTextIntoFocusedControl(text);
 }
 
 static void XLPostPasteAck(uint64_t request, BOOL success) {

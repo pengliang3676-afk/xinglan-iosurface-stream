@@ -36,6 +36,13 @@ ACTION_MAP = {
     "switch": SystemAction.APP_SWITCHER,
 }
 
+# Exact command channel used by the legacy browser version's two top buttons.
+LEGACY_CONTROL_PORT = 6000
+LEGACY_COMMAND_BYTES = {
+    "wake": b"14\r\n",
+    "sleep": b"15\r\n",
+}
+
 
 @dataclass
 class _QueuedAction:
@@ -148,6 +155,54 @@ async def send_action_to_devices(
 
     results = await asyncio.gather(
         *(send_one(udid) for udid in ordered),
+        return_exceptions=True,
+    )
+    return {
+        udid: bool(result) if not isinstance(result, BaseException) else False
+        for udid, result in zip(ordered, results)
+    }
+
+
+async def send_legacy_device_action(
+    udid: str,
+    action: str,
+    timeout: float = 2.5,
+) -> bool:
+    """Send the same fire-and-close command as the legacy browser backend."""
+    payload = LEGACY_COMMAND_BYTES.get(action)
+    if payload is None:
+        raise ValueError(f"不支持的旧版手机动作：{action}")
+
+    connection: Any | None = None
+    try:
+        connection = await asyncio.wait_for(
+            ServiceConnection.create_using_usbmux(
+                udid,
+                LEGACY_CONTROL_PORT,
+                connection_type="USB",
+            ),
+            timeout=timeout,
+        )
+        await asyncio.wait_for(connection.sendall(payload), timeout=timeout)
+        return True
+    except Exception:
+        return False
+    finally:
+        if connection is not None:
+            try:
+                await connection.close()
+            except Exception:
+                pass
+
+
+async def send_legacy_action_to_devices(
+    udids: Iterable[str],
+    action: str,
+) -> dict[str, bool]:
+    """Mirror Promise.all from the legacy browser backend for all USB phones."""
+    ordered = list(dict.fromkeys(udids))
+    results = await asyncio.gather(
+        *(send_legacy_device_action(udid, action) for udid in ordered),
         return_exceptions=True,
     )
     return {

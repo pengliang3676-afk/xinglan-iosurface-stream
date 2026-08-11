@@ -49,6 +49,14 @@ class TouchPhase(enum.IntEnum):
 class KeyCommand:
     page: int
     usage: int
+    modifiers: int = 0
+
+
+class KeyModifier(enum.IntFlag):
+    CONTROL = 1 << 0
+    SHIFT = 1 << 1
+    ALT = 1 << 2
+    GUI = 1 << 3
 
 
 class SystemAction(enum.IntEnum):
@@ -219,8 +227,16 @@ def pack_text_input(text: str, sequence: int) -> bytes:
 def pack_key_event(command: KeyCommand, sequence: int) -> bytes:
     if not 0 <= command.page <= 0xFFFFFFFF or not 0 <= command.usage <= 0xFFFFFFFF:
         raise ValueError("invalid HID key usage")
+    if not 0 <= command.modifiers <= 0x0F:
+        raise ValueError("invalid HID key modifiers")
     payload = struct.pack("!II", command.page, command.usage)
-    return pack_message(CONTROL_MAGIC, MessageType.KEY_EVENT, sequence, payload)
+    return pack_message(
+        CONTROL_MAGIC,
+        MessageType.KEY_EVENT,
+        sequence,
+        payload,
+        flags=command.modifiers,
+    )
 
 
 def unpack_touch(payload: bytes) -> TouchCommand:

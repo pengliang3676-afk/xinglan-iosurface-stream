@@ -210,9 +210,41 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
 }
 
 - (BOOL)sendKeyboardPage:(uint32_t)page usage:(uint32_t)usage {
-    if (![self sendKeyboardPage:page usage:usage down:YES]) return NO;
-    usleep(50000);
-    return [self sendKeyboardPage:page usage:usage down:NO];
+    return [self sendKeyboardPage:page usage:usage modifiers:0];
+}
+
+- (BOOL)sendKeyboardPage:(uint32_t)page
+                   usage:(uint32_t)usage
+               modifiers:(XLKeyModifier)modifiers {
+    const XLKeyModifier masks[] = {
+        XLKeyModifierControl, XLKeyModifierShift, XLKeyModifierAlt, XLKeyModifierGUI
+    };
+    const uint32_t usages[] = {0xE0, 0xE1, 0xE2, 0xE3};
+    NSUInteger pressed = 0;
+    for (NSUInteger index = 0; index < 4; index++) {
+        if (!(modifiers & masks[index])) continue;
+        if (![self sendKeyboardPage:0x07 usage:usages[index] down:YES]) {
+            for (NSInteger release = (NSInteger)pressed - 1; release >= 0; release--) {
+                NSUInteger prior = (NSUInteger)release;
+                if (modifiers & masks[prior]) {
+                    [self sendKeyboardPage:0x07 usage:usages[prior] down:NO];
+                }
+            }
+            return NO;
+        }
+        pressed = index + 1;
+    }
+    if (modifiers) usleep(8000);
+    BOOL sentDown = [self sendKeyboardPage:page usage:usage down:YES];
+    usleep(12000);
+    BOOL sentUp = sentDown && [self sendKeyboardPage:page usage:usage down:NO];
+    for (NSInteger index = 3; index >= 0; index--) {
+        NSUInteger release = (NSUInteger)index;
+        if (modifiers & masks[release]) {
+            if (![self sendKeyboardPage:0x07 usage:usages[release] down:NO]) sentUp = NO;
+        }
+    }
+    return sentDown && sentUp;
 }
 
 - (BOOL)sendPasteShortcut {
