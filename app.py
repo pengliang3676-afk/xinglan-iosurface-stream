@@ -48,6 +48,8 @@ BRAND_BANNER_HEIGHT = 36
 BRAND_BANNER_WIDTH = 568
 BRAND_BANNER_REL_X = 0.4705
 STATUS_BLOCK_WIDTH = 330
+MOTTO_LINE_ONE = "日日精进，久久为功；功不唐捐，玉汝于成"
+MOTTO_LINE_TWO = "道阻且长，行则将至；行而不辍，未来可期"
 RIGHT_PANEL_WIDTH = 360
 PHONE_HEAD_HEIGHT = 0
 SIDE_RAIL_WIDTH = 44
@@ -802,6 +804,24 @@ class XinglanApp:
             height=BRAND_BANNER_HEIGHT,
             anchor="n",
         )
+
+        # 左侧箴言与右侧两行设备状态保持相同的宽度、字号和行距。
+        motto_block = tk.Frame(toolbar, bg="#1d2939")
+        motto_block.place(
+            x=10,
+            y=1,
+            width=STATUS_BLOCK_WIDTH,
+            height=38,
+            anchor="nw",
+        )
+        tk.Label(
+            motto_block, text=MOTTO_LINE_ONE, bg="#1d2939", fg="#d0d5dd",
+            anchor="w", font=("Microsoft YaHei UI", 8),
+        ).pack(fill="x")
+        tk.Label(
+            motto_block, text=MOTTO_LINE_TWO, bg="#1d2939", fg="#d0d5dd",
+            anchor="w", font=("Microsoft YaHei UI", 8),
+        ).pack(fill="x")
 
         # 四个顶部按钮与右侧主控栏共用同一条左右边界。
         # 这样“全部开屏”的左边缘会和下方“全选”严格对齐。
