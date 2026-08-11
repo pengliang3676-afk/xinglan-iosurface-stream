@@ -42,8 +42,8 @@ WALL_COLUMNS = 5
 WALL_ROWS = 2
 GROUP_SIZE = WALL_COLUMNS * WALL_ROWS
 TILE_VIEW_SIZE = (230, 408)
-MASTER_VIEW_SIZE = (356, 656)
-TOP_BAR_HEIGHT = 48
+MASTER_VIEW_SIZE = (356, 667)
+TOP_BAR_HEIGHT = 40
 RIGHT_PANEL_WIDTH = 360
 PHONE_HEAD_HEIGHT = 0
 SIDE_RAIL_WIDTH = 44
@@ -765,7 +765,7 @@ class XinglanApp:
 
         # 严格复用旧版网页的 64px 顶栏和右侧 600px 操作区。
         toolbar = tk.Frame(root, bg="#1d2939", height=TOP_BAR_HEIGHT)
-        toolbar.pack(fill="x", padx=10, pady=(4, 3))
+        toolbar.pack(fill="x", padx=10, pady=(2, 2))
         toolbar.pack_propagate(False)
         tk.Label(
             toolbar, text="星澜 USB 原生群控", bg="#1d2939", fg="white",
@@ -778,7 +778,7 @@ class XinglanApp:
         top_actions.place(
             relx=1,
             x=0,
-            y=7,
+            y=3,
             width=RIGHT_PANEL_WIDTH,
             height=34,
             anchor="ne",
@@ -792,9 +792,9 @@ class XinglanApp:
         status_block.place(
             relx=1,
             x=-(RIGHT_PANEL_WIDTH + 20),
-            y=3,
+            y=1,
             width=620,
-            height=42,
+            height=38,
             anchor="ne",
         )
         tk.Label(
