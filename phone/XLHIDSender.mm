@@ -47,6 +47,12 @@ typedef IOHIDEventRef (*XLKeyboardEventFn)(CFAllocatorRef,
                                           uint32_t,
                                           bool,
                                           uint32_t);
+typedef IOHIDEventRef (*XLUnicodeEventFn)(CFAllocatorRef,
+                                         uint64_t,
+                                         const uint8_t *,
+                                         uint32_t,
+                                         uint32_t,
+                                         uint32_t);
 
 static const uint32_t XLDigitizerEventRange = 1u << 0;
 static const uint32_t XLDigitizerEventTouch = 1u << 1;
@@ -62,6 +68,7 @@ static const uint32_t XLEventFieldIsBuiltIn = 0x00000004;
 static const uint32_t XLDigitizerEventMask = 0xB0007;
 static const uint32_t XLDigitizerRange = 0xB0008;
 static const uint32_t XLDigitizerTouch = 0xB0009;
+static const uint32_t XLUnicodeEncodingUTF16LE = 1;
 // Known-good synthetic sender id used by TrollVNC/iOS HID generators on
 // iOS 14.8 through current releases. Without a sender id SpringBoard may
 // silently discard an otherwise valid dispatched event.
@@ -78,6 +85,7 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
     XLDigitizerEventFn _createDigitizerEvent;
     XLFingerEventFn _createFingerEvent;
     XLKeyboardEventFn _createKeyboardEvent;
+    XLUnicodeEventFn _createUnicodeEvent;
 }
 
 - (instancetype)init {
@@ -101,6 +109,8 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
         (XLFingerEventFn)dlsym(_ioKitHandle, "IOHIDEventCreateDigitizerFingerEvent");
     _createKeyboardEvent =
         (XLKeyboardEventFn)dlsym(_ioKitHandle, "IOHIDEventCreateKeyboardEvent");
+    _createUnicodeEvent =
+        (XLUnicodeEventFn)dlsym(_ioKitHandle, "IOHIDEventCreateUnicodeEvent");
     if (createClient) _client = createClient(kCFAllocatorDefault);
     return self;
 }
@@ -247,6 +257,58 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
         }
     }
     return sentDown && sentUp;
+}
+
+- (BOOL)sendUnicodeChunk:(NSString *)chunk {
+    if (!_client || !_dispatchEvent || !_createUnicodeEvent || !_setIntegerValue ||
+        !_setSenderID || chunk.length == 0) {
+        return NO;
+    }
+    NSData *payload = [chunk dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
+    if (payload.length == 0 || payload.length > UINT32_MAX) return NO;
+    IOHIDEventRef event = _createUnicodeEvent(kCFAllocatorDefault,
+                                               mach_absolute_time(),
+                                               (const uint8_t *)payload.bytes,
+                                               (uint32_t)payload.length,
+                                               XLUnicodeEncodingUTF16LE,
+                                               0);
+    if (!event) return NO;
+    // Mark the synthetic event as originating from the built-in input source.
+    // This is the same metadata used by the proven touch/keyboard path.
+    _setIntegerValue(event, XLEventFieldIsBuiltIn, 1);
+    _setSenderID(event, XLSyntheticSenderID);
+    _dispatchEvent(_client, event);
+    CFRelease(event);
+    return YES;
+}
+
+- (BOOL)sendUnicodeText:(NSString *)text {
+    if (!text.length || !_createUnicodeEvent) return NO;
+    __block BOOL sent = YES;
+    __block NSMutableString *chunk = [NSMutableString string];
+    [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                              options:NSStringEnumerationByComposedCharacterSequences
+                           usingBlock:^(NSString *part,
+                                        NSRange substringRange,
+                                        NSRange enclosingRange,
+                                        BOOL *stop) {
+        (void)substringRange;
+        (void)enclosingRange;
+        if (chunk.length > 0 && chunk.length + part.length > 64) {
+            sent = [self sendUnicodeChunk:[chunk copy]];
+            [chunk setString:@""];
+            if (!sent) {
+                *stop = YES;
+                return;
+            }
+            usleep(5000);
+        }
+        [chunk appendString:part];
+    }];
+    if (sent && chunk.length > 0) {
+        sent = [self sendUnicodeChunk:[chunk copy]];
+    }
+    return sent;
 }
 
 - (BOOL)sendPasteShortcut {

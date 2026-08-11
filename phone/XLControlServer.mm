@@ -21,13 +21,6 @@ static std::atomic_uint XLControlErrors(0);
 
 static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
 static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
-static const char *XLTextInsertNotification = "com.jibeib.xlstream.text.insert";
-static const char *XLTextPasteBeginNotification = "com.jibeib.xlstream.text.paste.begin";
-static const char *XLTextPasteChunkNotification = "com.jibeib.xlstream.text.paste.chunk";
-static const char *XLTextPasteCommitNotification = "com.jibeib.xlstream.text.paste.commit";
-static const char *XLTextPasteAckNotification = "com.jibeib.xlstream.text.paste.ack";
-static const char *XLTextDeleteNotification = "com.jibeib.xlstream.text.delete";
-static const char *XLTextReturnNotification = "com.jibeib.xlstream.text.return";
 
 static BOOL XLReadAll(int socketHandle, void *buffer, size_t length) {
     uint8_t *bytes = (uint8_t *)buffer;
@@ -105,110 +98,11 @@ static uint32_t XLHandleTouch(XLHIDSender *sender, const NSData *data) {
                          pressure:pressure] ? 0 : 4;
 }
 
-static BOOL XLPostTextScalars(NSString *text) {
-    int token = 0;
-    if (notify_register_check(XLTextInsertNotification, &token) != NOTIFY_STATUS_OK) {
-        return NO;
-    }
-    BOOL sent = YES;
-    for (NSUInteger index = 0; index < text.length;) {
-        NSRange range = [text rangeOfComposedCharacterSequenceAtIndex:index];
-        NSString *part = [text substringWithRange:range];
-        NSData *utf8 = [part dataUsingEncoding:NSUTF8StringEncoding];
-        // A composed emoji can exceed seven bytes. Split it at Unicode scalar
-        // boundaries so every notification fits into notify's 64-bit state.
-        if (utf8.length > 7) {
-            unichar first = [text characterAtIndex:index];
-            range.length = (CFStringIsSurrogateHighCharacter(first) &&
-                            index + 1 < text.length &&
-                            CFStringIsSurrogateLowCharacter([text characterAtIndex:index + 1])) ? 2 : 1;
-            part = [text substringWithRange:range];
-            utf8 = [part dataUsingEncoding:NSUTF8StringEncoding];
-        }
-        if (utf8.length == 0 || utf8.length > 7) {
-            sent = NO;
-            break;
-        }
-        uint64_t state = ((uint64_t)utf8.length << 56);
-        const uint8_t *bytes = (const uint8_t *)utf8.bytes;
-        for (NSUInteger byteIndex = 0; byteIndex < utf8.length; byteIndex++) {
-            state |= ((uint64_t)bytes[byteIndex] << (byteIndex * 8));
-        }
-        if (notify_set_state(token, state) != NOTIFY_STATUS_OK ||
-            notify_post(XLTextInsertNotification) != NOTIFY_STATUS_OK) {
-            sent = NO;
-            break;
-        }
-        // Prevent Darwin notifications for consecutive characters from being
-        // coalesced before the foreground app consumes the shared state.
-        usleep(20000);
-        index = NSMaxRange(range);
-    }
-    notify_cancel(token);
-    return sent;
-}
-
-static BOOL XLPostPasteText(NSString *text) {
-    NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
-    if (utf8.length == 0 || utf8.length > XLMaxMessagePayload) return NO;
-    static std::atomic_uint_fast64_t nextRequest(1);
-    uint64_t request = nextRequest.fetch_add(1);
-    request &= 0x7FFFFFFFFFFFFFFFULL;
-    if (request == 0) request = nextRequest.fetch_add(1) & 0x7FFFFFFFFFFFFFFFULL;
-    int beginToken = 0;
-    int chunkToken = 0;
-    int ackToken = 0;
-    if (notify_register_check(XLTextPasteBeginNotification, &beginToken) != NOTIFY_STATUS_OK ||
-        notify_register_check(XLTextPasteChunkNotification, &chunkToken) != NOTIFY_STATUS_OK ||
-        notify_register_check(XLTextPasteAckNotification, &ackToken) != NOTIFY_STATUS_OK) {
-        if (beginToken) notify_cancel(beginToken);
-        if (chunkToken) notify_cancel(chunkToken);
-        if (ackToken) notify_cancel(ackToken);
-        return NO;
-    }
-    BOOL sent = notify_set_state(beginToken, request) == NOTIFY_STATUS_OK &&
-                notify_post(XLTextPasteBeginNotification) == NOTIFY_STATUS_OK;
-    usleep(30000);
-    const uint8_t *bytes = (const uint8_t *)utf8.bytes;
-    for (NSUInteger offset = 0; sent && offset < utf8.length; offset += 7) {
-        NSUInteger length = MIN((NSUInteger)7, utf8.length - offset);
-        uint64_t state = ((uint64_t)length << 56);
-        for (NSUInteger index = 0; index < length; index++) {
-            state |= ((uint64_t)bytes[offset + index] << (index * 8));
-        }
-        sent = notify_set_state(chunkToken, state) == NOTIFY_STATUS_OK &&
-               notify_post(XLTextPasteChunkNotification) == NOTIFY_STATUS_OK;
-        // Keep consecutive state updates from being coalesced before the
-        // foreground app has copied each chunk.
-        usleep(30000);
-    }
-    if (sent) {
-        sent = notify_post(XLTextPasteCommitNotification) == NOTIFY_STATUS_OK;
-    }
-    BOOL applied = NO;
-    for (NSUInteger attempt = 0; sent && attempt < 75; attempt++) {
-        uint64_t ackState = 0;
-        if (notify_get_state(ackToken, &ackState) == NOTIFY_STATUS_OK &&
-            (ackState >> 1) == request) {
-            applied = (ackState & 1) != 0;
-            break;
-        }
-        usleep(10000);
-    }
-    notify_cancel(beginToken);
-    notify_cancel(chunkToken);
-    notify_cancel(ackToken);
-    return sent && applied;
-}
-
 static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
     if (data.length == 0 || data.length > XLMaxMessagePayload) return 2;
     NSString *text = [[NSString alloc] initWithData:(NSData *)data encoding:NSUTF8StringEncoding];
     if (!text.length) return 3;
-    // Only acknowledge success after the foreground app confirms that it
-    // applied the text through its active iOS keyboard/input responder.
-    (void)sender;
-    return XLPostPasteText(text) ? 0 : 4;
+    return [sender sendUnicodeText:text] ? 0 : 4;
 }
 
 static uint32_t XLHandleKeyEvent(

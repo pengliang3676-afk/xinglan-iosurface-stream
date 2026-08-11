@@ -20,6 +20,7 @@
 - (BOOL)sendKeyboardPage:(uint32_t)page
                    usage:(uint32_t)usage
                modifiers:(XLKeyModifier)modifiers;
+- (BOOL)sendUnicodeText:(NSString *)text;
 - (BOOL)sendPasteShortcut;
 
 @end

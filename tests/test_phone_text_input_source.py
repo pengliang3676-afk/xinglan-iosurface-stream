@@ -6,13 +6,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PhoneTextInputSourceTests(unittest.TestCase):
-    def test_text_input_requires_foreground_app_ack(self):
+    def test_text_input_uses_daemon_unicode_hid(self):
         source = (ROOT / "phone" / "XLControlServer.mm").read_text(encoding="utf-8")
         handler = source[source.index("static uint32_t XLHandleTextInput") :]
-        self.assertIn("XLPostPasteText(text)", handler)
-        self.assertIn("XLTextPasteAckNotification", source)
-        self.assertIn("(ackState >> 1) == request", source)
-        self.assertNotIn("XLPostTextScalars(text) ? 0", handler)
+        self.assertIn("[sender sendUnicodeText:text]", handler)
+        self.assertNotIn("XLPostPasteText", source)
+        self.assertNotIn("XLTextPasteAckNotification", source)
+
+    def test_unicode_hid_uses_utf16_sender_metadata_and_chunks(self):
+        source = (ROOT / "phone" / "XLHIDSender.mm").read_text(encoding="utf-8")
+        self.assertIn('dlsym(_ioKitHandle, "IOHIDEventCreateUnicodeEvent")', source)
+        self.assertIn("NSUTF16LittleEndianStringEncoding", source)
+        self.assertIn("XLUnicodeEncodingUTF16LE", source)
+        self.assertIn("_setSenderID(event, XLSyntheticSenderID)", source)
+        self.assertIn("NSStringEnumerationByComposedCharacterSequences", source)
 
     def test_foreground_tweak_reassembles_and_directly_inserts_complete_text(self):
         source = (ROOT / "phone" / "XLSystemActions.xm").read_text(encoding="utf-8")
@@ -38,9 +45,9 @@ class PhoneTextInputSourceTests(unittest.TestCase):
         info = (ROOT / "phone" / "layout" / "Applications" / "XLStream.app" / "Info.plist").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Version: 0.5.3", control)
-        self.assertIn("<string>0.5.3</string>", info)
-        self.assertIn("<string>53</string>", info)
+        self.assertIn("Version: 0.5.4", control)
+        self.assertIn("<string>0.5.4</string>", info)
+        self.assertIn("<string>54</string>", info)
 
     def test_package_scripts_never_wait_for_launchctl(self):
         scripts = ROOT / "phone" / "layout" / "DEBIAN"
