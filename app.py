@@ -44,6 +44,8 @@ GROUP_SIZE = WALL_COLUMNS * WALL_ROWS
 TILE_VIEW_SIZE = (230, 408)
 MASTER_VIEW_SIZE = (356, 667)
 TOP_BAR_HEIGHT = 40
+BRAND_BANNER_HEIGHT = 36
+BRAND_BANNER_WIDTH = 213
 RIGHT_PANEL_WIDTH = 360
 PHONE_HEAD_HEIGHT = 0
 SIDE_RAIL_WIDTH = 44
@@ -52,6 +54,17 @@ TILE_NUMBER_FONT_SIZE = 12
 WALL_GAP = 3
 DISPLAY_INTERVAL_MS = 80
 LOGGER = logging.getLogger("xinglan.app")
+
+
+def load_brand_banner(master: tk.Misc) -> ImageTk.PhotoImage:
+    """Load the exact legacy toolbar brand and fit it into the compact bar."""
+    banner_path = PROJECT_DIR / "assets" / "legacy-brand-banner.png"
+    with Image.open(banner_path) as source:
+        banner = source.convert("RGB").resize(
+            (BRAND_BANNER_WIDTH, BRAND_BANNER_HEIGHT),
+            Image.Resampling.LANCZOS,
+        )
+    return ImageTk.PhotoImage(banner, master=master)
 
 
 def load_placeholder_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -769,6 +782,15 @@ class XinglanApp:
         toolbar = tk.Frame(root, bg="#1d2939", height=TOP_BAR_HEIGHT)
         toolbar.pack(fill="x", padx=10, pady=(2, 2))
         toolbar.pack_propagate(False)
+        self.brand_banner_image = load_brand_banner(toolbar)
+        tk.Label(
+            toolbar,
+            image=self.brand_banner_image,
+            bg="#1d2939",
+            borderwidth=0,
+            highlightthickness=0,
+        ).place(x=2, y=2, width=BRAND_BANNER_WIDTH, height=BRAND_BANNER_HEIGHT)
+
         # 四个顶部按钮与右侧主控栏共用同一条左右边界。
         # 这样“全部开屏”的左边缘会和下方“全选”严格对齐。
         top_actions = tk.Frame(toolbar, bg="#1d2939")
