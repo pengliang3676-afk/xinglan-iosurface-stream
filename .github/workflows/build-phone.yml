@@ -57,3 +57,37 @@ jobs:
           name: XLStream-${{ matrix.name }}
           path: output/*.deb
           if-no-files-found: error
+
+  build-repair-ipa:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
+        run: |
+          brew install ldid xz
+          git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
+
+      - name: Build RootHide repair app
+        env:
+          THEOS: ${{ runner.temp }}/theos-link
+        run: |
+          ln -s "$HOME/theos" "$THEOS"
+          make -C repair-ipa clean all FINALPACKAGE=1
+
+      - name: Assemble TrollStore IPA
+        run: |
+          mkdir -p output/Payload
+          cp -R repair-ipa/.theos/obj/XLStreamRepair.app output/Payload/
+          cd output
+          zip -qry XLStream-Repair-RootHide.ipa Payload
+
+      - name: Upload repair IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: XLStream-Repair-RootHide
+          path: output/XLStream-Repair-RootHide.ipa
+          if-no-files-found: error
