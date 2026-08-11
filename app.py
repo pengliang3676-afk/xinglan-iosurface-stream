@@ -995,8 +995,8 @@ class XinglanApp:
 
         shortcut_row = fixed_row(self.controls, 1)
         for index, (text, command) in enumerate((
-            ("主屏", lambda: self.route_system_action(SystemAction.HOME)),
             ("切换", self.switch_window),
+            ("主屏", lambda: self.route_system_action(SystemAction.HOME)),
             ("控制", lambda: self.route_system_action(SystemAction.CONTROL_CENTER)),
         )):
             tk.Button(
