@@ -862,14 +862,25 @@ class XinglanApp:
         """Build the right-side controls in the same order as the StarLan web UI."""
         self.controls = tk.Frame(self.right_panel, bg="#101828")
         self.controls.grid(row=2, column=0, sticky="nsew")
+        self.controls.grid_columnconfigure(0, weight=1)
+        for row_index in range(4):
+            self.controls.grid_rowconfigure(
+                row_index, weight=1, uniform="right-control-rows"
+            )
 
-        def fixed_row(parent: tk.Widget, *, bottom: int = 1) -> tk.Frame:
+        def fixed_row(parent: tk.Widget, row_index: int) -> tk.Frame:
             row = tk.Frame(parent, bg="#101828")
-            row.pack(fill="both", expand=True, padx=8, pady=(1, bottom))
+            row.grid(
+                row=row_index,
+                column=0,
+                sticky="nsew",
+                padx=8,
+                pady=1,
+            )
             return row
 
         group_row = tk.Frame(self.controls, bg="#101828")
-        group_row.pack(fill="both", expand=True, padx=8, pady=(2, 1))
+        group_row.grid(row=0, column=0, sticky="nsew", padx=8, pady=(2, 1))
         self.group_var = tk.StringVar(value="第1组")
         self.group_combo = tk.Menubutton(
             group_row,
@@ -914,7 +925,7 @@ class XinglanApp:
 
         # 键盘输入由独立的轻量IME进程接收；它不加载投屏或分组代码。
 
-        shortcut_row = fixed_row(self.controls)
+        shortcut_row = fixed_row(self.controls, 1)
         for index, (text, command) in enumerate((
             ("主屏", lambda: self.route_system_action(SystemAction.HOME)),
             ("切换", self.switch_window),
@@ -931,7 +942,7 @@ class XinglanApp:
                 padx=(0 if index == 0 else 4, 0 if index == 2 else 4),
             )
 
-        file_row = fixed_row(self.controls)
+        file_row = fixed_row(self.controls, 2)
         tk.Button(
             file_row, text="文件传输", command=self.open_file_transfer,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
@@ -939,7 +950,7 @@ class XinglanApp:
         ).pack(fill="both", expand=True)
 
         mode_row = tk.Frame(self.controls, bg="#101828")
-        mode_row.pack(fill="both", expand=True, padx=8, pady=(1, 2))
+        mode_row.grid(row=3, column=0, sticky="nsew", padx=8, pady=(1, 2))
         tk.Button(
             mode_row, text="全部投屏",
             command=self.start_current_group,
