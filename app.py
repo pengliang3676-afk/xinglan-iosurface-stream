@@ -868,7 +868,7 @@ class XinglanApp:
         self.health_tick = 0
         self._scan_in_progress = False
         self._closing = False
-        root.title("")
+        root.title("星澜")
         try:
             root.iconbitmap(default=str(PROJECT_DIR / "assets" / "xinglan.ico"))
         except tk.TclError:
