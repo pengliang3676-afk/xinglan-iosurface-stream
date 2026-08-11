@@ -42,7 +42,7 @@ WALL_COLUMNS = 5
 WALL_ROWS = 2
 GROUP_SIZE = WALL_COLUMNS * WALL_ROWS
 TILE_VIEW_SIZE = (230, 408)
-MASTER_VIEW_SIZE = (356, 633)
+MASTER_VIEW_SIZE = (356, 656)
 TOP_BAR_HEIGHT = 48
 RIGHT_PANEL_WIDTH = 360
 PHONE_HEAD_HEIGHT = 0
@@ -643,18 +643,12 @@ class MasterView:
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
         self.render_size = (canvas_width, canvas_height)
-        scale = min(canvas_width / image.width, canvas_height / image.height)
-        width = max(1, int(image.width * scale))
-        height = max(1, int(image.height * scale))
-        resized = image if image.size == (width, height) else image.resize(
-            (width, height), Image.Resampling.LANCZOS
+        target_size = (canvas_width, canvas_height)
+        resized = image if image.size == target_size else image.resize(
+            target_size, Image.Resampling.LANCZOS
         )
-        surface = Image.new("RGB", (canvas_width, canvas_height), "black")
-        x = (canvas_width - width) // 2
-        y = (canvas_height - height) // 2
-        surface.paste(resized, (x, y))
-        self.image_bounds = (x, y, x + width, y + height)
-        self._set_photo(surface)
+        self.image_bounds = (0, 0, canvas_width, canvas_height)
+        self._set_photo(resized)
 
     def _canvas_resized(self, _event: tk.Event) -> None:
         if self.session is None:
