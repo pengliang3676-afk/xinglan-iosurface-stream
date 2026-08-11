@@ -94,8 +94,9 @@ jobs:
             for script in preinst postinst prerm postrm config; do
               test ! -e "$verify_dir/$script"
             done
-            dpkg-deb --fsys-tarfile "$package" | tar -tf - | grep -q 'XLStream.app/bin/xlstreamd'
-            dpkg-deb --fsys-tarfile "$package" | tar -tf - | grep -q 'XLSystemActions.dylib'
+            dpkg-deb --fsys-tarfile "$package" | tar -tf - > "$verify_dir/files.txt"
+            grep -q 'XLStream.app/bin/xlstreamd' "$verify_dir/files.txt"
+            grep -q 'XLSystemActions.dylib' "$verify_dir/files.txt"
           done
           test "$count" -eq 2
 
