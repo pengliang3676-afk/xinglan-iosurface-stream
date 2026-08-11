@@ -12,6 +12,8 @@ from app import (
     PHONE_HEAD_HEIGHT,
     RIGHT_PANEL_WIDTH,
     SIDE_RAIL_WIDTH,
+    TILE_CHECKBOX_SIZE,
+    TILE_NUMBER_FONT_SIZE,
     TOP_BAR_HEIGHT,
     WALL_COLUMNS,
     WALL_GAP,
@@ -36,6 +38,8 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(40, TOP_BAR_HEIGHT)
         self.assertEqual(0, PHONE_HEAD_HEIGHT)
         self.assertEqual(44, SIDE_RAIL_WIDTH)
+        self.assertEqual(32, TILE_CHECKBOX_SIZE)
+        self.assertEqual(12, TILE_NUMBER_FONT_SIZE)
         self.assertEqual(3, WALL_GAP)
         self.assertEqual(360, RIGHT_PANEL_WIDTH)
 

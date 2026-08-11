@@ -47,6 +47,8 @@ TOP_BAR_HEIGHT = 40
 RIGHT_PANEL_WIDTH = 360
 PHONE_HEAD_HEIGHT = 0
 SIDE_RAIL_WIDTH = 44
+TILE_CHECKBOX_SIZE = 32
+TILE_NUMBER_FONT_SIZE = 12
 WALL_GAP = 3
 DISPLAY_INTERVAL_MS = 80
 LOGGER = logging.getLogger("xinglan.app")
@@ -178,8 +180,8 @@ class DeviceTile:
             value=self.owner.is_device_selected(self.session.udid)
         )
         self.selection_icons = {
-            False: make_checkbox_icon(self.side, 20, False),
-            True: make_checkbox_icon(self.side, 20, True),
+            False: make_checkbox_icon(self.side, TILE_CHECKBOX_SIZE, False),
+            True: make_checkbox_icon(self.side, TILE_CHECKBOX_SIZE, True),
         }
         self.selection_check = tk.Button(
             self.side,
@@ -195,14 +197,14 @@ class DeviceTile:
             padx=0,
             pady=0,
         )
-        self.selection_check.pack(pady=(1, 0))
+        self.selection_check.pack(fill="x", padx=3, pady=(2, 1))
         tk.Label(
             self.side,
             text=f"{index + 1:02d}",
             bg="#111827",
             fg="white",
-            font=("Microsoft YaHei UI", 10, "bold"),
-        ).pack(pady=(0, 6))
+            font=("Microsoft YaHei UI", TILE_NUMBER_FONT_SIZE, "bold"),
+        ).pack(fill="x", padx=3, pady=(0, 5), ipady=2)
         self.master_button = tk.Button(
             self.side,
             text="主控",
@@ -503,8 +505,8 @@ class EmptySlot:
         side.pack_propagate(False)
         tk.Label(
             side, text=f"{index + 1:02d}", bg="#111827", fg="#98a2b3",
-            font=("Microsoft YaHei UI", 9, "bold")
-        ).pack(pady=(5, 8))
+            font=("Microsoft YaHei UI", TILE_NUMBER_FONT_SIZE, "bold")
+        ).pack(fill="x", padx=3, pady=(5, 7), ipady=2)
         for label in ("主控", "开始", "停止", "主屏", "切换", "控制"):
             tk.Button(
                 side, text=label, state="disabled",
