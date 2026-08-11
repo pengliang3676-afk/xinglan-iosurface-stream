@@ -106,6 +106,7 @@ class DeviceTile:
         self.photo: ImageTk.PhotoImage | None = None
         self.render_size = (0, 0)
         self.image_bounds = (0, 0, tile_width, tile_height)
+        self.placeholder_text = ""
 
         # 固定卡片外框。帧率/延迟文字每秒变化时，不允许Tk重新计算卡片宽度。
         self.frame = tk.Frame(
@@ -257,6 +258,7 @@ class DeviceTile:
         self.canvas.bind("<Control-v>", self._paste)
         self.canvas.bind("<Control-V>", self._paste)
         self.canvas.bind("<KeyPress>", self._key_press)
+        self.canvas.bind("<Configure>", self._canvas_resized)
         self.set_connected(self.owner.is_session_active(self.session.udid))
         self._show_placeholder(
             "正在连接" if self.owner.is_session_active(self.session.udid) else "等待手动投屏"
@@ -332,15 +334,31 @@ class DeviceTile:
         self._show_image(image)
 
     def _show_placeholder(self, text: str) -> None:
-        image = Image.new("RGB", (self.tile_width, self.tile_height), "#101828")
+        self.placeholder_text = text
+        width = max(1, self.canvas.winfo_width())
+        height = max(1, self.canvas.winfo_height())
+        if width <= 1 or height <= 1:
+            width, height = self.tile_width, self.tile_height
+        self.render_size = (width, height)
+        self.image_bounds = (0, 0, width, height)
+        image = Image.new("RGB", (width, height), "#101828")
         draw = ImageDraw.Draw(image)
         draw.text(
-            (self.tile_width // 2, self.tile_height // 2),
+            (width // 2, height // 2),
             text,
             fill="#98a2b3",
             anchor="mm",
         )
         self._set_photo(image)
+
+    def _canvas_resized(self, event: tk.Event) -> None:
+        if event.width <= 1 or event.height <= 1:
+            return
+        _, _, image = self.session.latest.snapshot()
+        if image is None:
+            self._show_placeholder(self.placeholder_text)
+        else:
+            self.last_sequence = -1
 
     def _set_photo(self, image: Image.Image) -> None:
         """Reuse the Tk image buffer to avoid creating hundreds of GDI objects/sec."""
