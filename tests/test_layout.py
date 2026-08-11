@@ -9,6 +9,7 @@ sys.path.insert(0, str(PROJECT))
 
 from app import (
     BRAND_BANNER_HEIGHT,
+    BRAND_BANNER_REL_X,
     BRAND_BANNER_WIDTH,
     MASTER_VIEW_SIZE,
     PHONE_HEAD_HEIGHT,
@@ -40,9 +41,13 @@ class LayoutTests(unittest.TestCase):
     def test_layout_matches_starlan_card_structure(self) -> None:
         self.assertEqual(40, TOP_BAR_HEIGHT)
         self.assertEqual(36, BRAND_BANNER_HEIGHT)
-        self.assertEqual(213, BRAND_BANNER_WIDTH)
+        self.assertEqual(227, BRAND_BANNER_WIDTH)
+        self.assertAlmostEqual(0.46, BRAND_BANNER_REL_X)
         self.assertLessEqual(BRAND_BANNER_HEIGHT, TOP_BAR_HEIGHT)
-        self.assertTrue((PROJECT / "assets" / "legacy-brand-banner.png").is_file())
+        self.assertTrue(
+            (PROJECT / "assets" / "legacy-brand-banner-five.png").is_file()
+        )
+        self.assertTrue((PROJECT / "assets" / "xinglan.ico").is_file())
         self.assertEqual(450, STATUS_BLOCK_WIDTH)
         self.assertEqual(0, PHONE_HEAD_HEIGHT)
         self.assertEqual(44, SIDE_RAIL_WIDTH)

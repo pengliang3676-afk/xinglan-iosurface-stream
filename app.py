@@ -45,7 +45,8 @@ TILE_VIEW_SIZE = (230, 408)
 MASTER_VIEW_SIZE = (356, 667)
 TOP_BAR_HEIGHT = 40
 BRAND_BANNER_HEIGHT = 36
-BRAND_BANNER_WIDTH = 213
+BRAND_BANNER_WIDTH = 227
+BRAND_BANNER_REL_X = 0.46
 STATUS_BLOCK_WIDTH = 450
 RIGHT_PANEL_WIDTH = 360
 PHONE_HEAD_HEIGHT = 0
@@ -59,7 +60,7 @@ LOGGER = logging.getLogger("xinglan.app")
 
 def load_brand_banner(master: tk.Misc) -> ImageTk.PhotoImage:
     """Load the exact legacy toolbar brand and fit it into the compact bar."""
-    banner_path = PROJECT_DIR / "assets" / "legacy-brand-banner.png"
+    banner_path = PROJECT_DIR / "assets" / "legacy-brand-banner-five.png"
     with Image.open(banner_path) as source:
         banner = source.convert("RGB").resize(
             (BRAND_BANNER_WIDTH, BRAND_BANNER_HEIGHT),
@@ -763,7 +764,11 @@ class XinglanApp:
         self.health_tick = 0
         self._scan_in_progress = False
         self._closing = False
-        root.title("")
+        root.title("星澜")
+        try:
+            root.iconbitmap(default=str(PROJECT_DIR / "assets" / "xinglan.ico"))
+        except tk.TclError:
+            LOGGER.warning("failed to load legacy Xinglan window icon", exc_info=True)
         root.configure(bg="#0b1220")
         root.geometry("1280x900")
         try:
@@ -791,7 +796,7 @@ class XinglanApp:
             borderwidth=0,
             highlightthickness=0,
         ).place(
-            relx=0.5,
+            relx=BRAND_BANNER_REL_X,
             y=2,
             width=BRAND_BANNER_WIDTH,
             height=BRAND_BANNER_HEIGHT,
@@ -2141,6 +2146,15 @@ def main() -> None:
         decoder_backend,
         log_path,
     )
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "Xinglan.USBControl"
+            )
+        except (AttributeError, OSError):
+            LOGGER.warning("failed to set Windows application identity", exc_info=True)
     root = tk.Tk()
     XinglanApp(
         root,
