@@ -14,6 +14,7 @@ from app import (
     PHONE_HEAD_HEIGHT,
     RIGHT_PANEL_WIDTH,
     SIDE_RAIL_WIDTH,
+    STATUS_BLOCK_WIDTH,
     TILE_CHECKBOX_SIZE,
     TILE_NUMBER_FONT_SIZE,
     TOP_BAR_HEIGHT,
@@ -42,6 +43,7 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(213, BRAND_BANNER_WIDTH)
         self.assertLessEqual(BRAND_BANNER_HEIGHT, TOP_BAR_HEIGHT)
         self.assertTrue((PROJECT / "assets" / "legacy-brand-banner.png").is_file())
+        self.assertEqual(450, STATUS_BLOCK_WIDTH)
         self.assertEqual(0, PHONE_HEAD_HEIGHT)
         self.assertEqual(44, SIDE_RAIL_WIDTH)
         self.assertEqual(32, TILE_CHECKBOX_SIZE)

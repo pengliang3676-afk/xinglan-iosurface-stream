@@ -46,6 +46,7 @@ MASTER_VIEW_SIZE = (356, 667)
 TOP_BAR_HEIGHT = 40
 BRAND_BANNER_HEIGHT = 36
 BRAND_BANNER_WIDTH = 213
+STATUS_BLOCK_WIDTH = 450
 RIGHT_PANEL_WIDTH = 360
 PHONE_HEAD_HEIGHT = 0
 SIDE_RAIL_WIDTH = 44
@@ -789,7 +790,13 @@ class XinglanApp:
             bg="#1d2939",
             borderwidth=0,
             highlightthickness=0,
-        ).place(x=2, y=2, width=BRAND_BANNER_WIDTH, height=BRAND_BANNER_HEIGHT)
+        ).place(
+            relx=0.5,
+            y=2,
+            width=BRAND_BANNER_WIDTH,
+            height=BRAND_BANNER_HEIGHT,
+            anchor="n",
+        )
 
         # 四个顶部按钮与右侧主控栏共用同一条左右边界。
         # 这样“全部开屏”的左边缘会和下方“全选”严格对齐。
@@ -812,7 +819,7 @@ class XinglanApp:
             relx=1,
             x=-(RIGHT_PANEL_WIDTH + 20),
             y=1,
-            width=620,
+            width=STATUS_BLOCK_WIDTH,
             height=38,
             anchor="ne",
         )
@@ -2052,9 +2059,8 @@ class XinglanApp:
                 f"{self.stability_monitor.duration_seconds / 60:.0f}分"
             )
         self.health.set(
-            f"投屏 {len(stats)} 台 · 总帧率 {total_fps:.1f} · 硬解 {hardware_decoders} · 软解 {software_decoders}"
+            f"投屏 {len(stats)} 台 · 总帧率 {total_fps:.1f}"
             f" · CPU {cpu_percent:.0f}% · 内存 {memory_mb:.0f} MB"
-            f" · 重连 {reconnects} · 解码错 {decode_errors}"
             f"{stability_text}"
         )
         if self.stability_monitor is not None and self.stability_monitor.report_path is None:
