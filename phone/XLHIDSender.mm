@@ -210,7 +210,9 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
 }
 
 - (BOOL)sendKeyboardPage:(uint32_t)page usage:(uint32_t)usage {
-    return [self sendKeyboardPage:page usage:usage modifiers:0];
+    return [self sendKeyboardPage:page
+                              usage:usage
+                          modifiers:(XLKeyModifier)0];
 }
 
 - (BOOL)sendKeyboardPage:(uint32_t)page
