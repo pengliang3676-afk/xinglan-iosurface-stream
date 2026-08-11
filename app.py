@@ -97,6 +97,7 @@ class NativeTitleOverlay:
     WIDTH = 90
     HEIGHT = 22
     VERTICAL_OFFSET = 4
+    LEFT_INSET = 22
 
     def __init__(self, root: tk.Tk, text: str, rel_x: float) -> None:
         self.root = root
@@ -109,7 +110,7 @@ class NativeTitleOverlay:
         self.window.overrideredirect(True)
         self.window.transient(root)
         self.window.configure(bg="#f3f3f3")
-        tk.Label(
+        self.label = tk.Label(
             self.window,
             text=text,
             bg="#f3f3f3",
@@ -117,7 +118,7 @@ class NativeTitleOverlay:
             borderwidth=0,
             highlightthickness=0,
             font=("Microsoft YaHei UI", 9),
-        ).pack(fill="both", expand=True)
+        )
         root.bind("<Configure>", self._schedule_refresh, add="+")
         root.bind("<Map>", self._schedule_refresh, add="+")
         root.bind("<Unmap>", self._hide, add="+")
@@ -150,15 +151,23 @@ class NativeTitleOverlay:
             )
             target_x = client_left + 10 + ((client_width - 20) * self.rel_x)
             caption_height = max(self.HEIGHT, client_top - outer_top)
-            x = round(target_x - (self.WIDTH / 2))
-            y = round(
-                outer_top
-                + ((caption_height - self.HEIGHT) / 2)
-                + self.VERTICAL_OFFSET
+            x = outer_left + self.LEFT_INSET
+            y = round(outer_top + ((caption_height - self.HEIGHT) / 2))
+            width = max(
+                self.WIDTH,
+                round(target_x + (self.WIDTH / 2) - x),
             )
-            geometry = f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}"
+            overlay_height = self.HEIGHT + self.VERTICAL_OFFSET
+            label_x = round(target_x - x - (self.WIDTH / 2))
+            geometry = f"{width}x{overlay_height}+{x}+{y}"
             if geometry != self._last_geometry:
                 self.window.geometry(geometry)
+                self.label.place(
+                    x=label_x,
+                    y=self.VERTICAL_OFFSET,
+                    width=self.WIDTH,
+                    height=self.HEIGHT,
+                )
                 self._last_geometry = geometry
             if not self._visible:
                 self.window.deiconify()
