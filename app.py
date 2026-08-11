@@ -96,11 +96,14 @@ class NativeTitleOverlay:
 
     WIDTH = 90
     HEIGHT = 22
+    VERTICAL_OFFSET = 4
 
     def __init__(self, root: tk.Tk, text: str, rel_x: float) -> None:
         self.root = root
         self.rel_x = rel_x
         self._after_id: str | None = None
+        self._last_geometry: str | None = None
+        self._visible = False
         self.window = tk.Toplevel(root)
         self.window.withdraw()
         self.window.overrideredirect(True)
@@ -123,6 +126,7 @@ class NativeTitleOverlay:
     def _hide(self, _event: tk.Event | None = None) -> None:
         try:
             self.window.withdraw()
+            self._visible = False
         except tk.TclError:
             pass
 
@@ -147,10 +151,19 @@ class NativeTitleOverlay:
             target_x = client_left + 10 + ((client_width - 20) * self.rel_x)
             caption_height = max(self.HEIGHT, client_top - outer_top)
             x = round(target_x - (self.WIDTH / 2))
-            y = round(outer_top + ((caption_height - self.HEIGHT) / 2))
-            self.window.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}")
-            self.window.deiconify()
-            self.window.lift(self.root)
+            y = round(
+                outer_top
+                + ((caption_height - self.HEIGHT) / 2)
+                + self.VERTICAL_OFFSET
+            )
+            geometry = f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}"
+            if geometry != self._last_geometry:
+                self.window.geometry(geometry)
+                self._last_geometry = geometry
+            if not self._visible:
+                self.window.deiconify()
+                self.window.lift(self.root)
+                self._visible = True
         except (OSError, tk.TclError):
             self._hide()
 
