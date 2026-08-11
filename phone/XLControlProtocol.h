@@ -40,6 +40,7 @@ enum XLSystemAction : uint16_t {
     XLSystemActionLock = 3,
     XLSystemActionScreenshot = 4,
     XLSystemActionAppSwitcher = 5,
+    XLSystemActionControlCenter = 6,
 };
 
 enum XLCapability : uint32_t {

@@ -65,6 +65,7 @@ class SystemAction(enum.IntEnum):
     LOCK = 3
     SCREENSHOT = 4
     APP_SWITCHER = 5
+    CONTROL_CENTER = 6
 
 
 @dataclass(frozen=True)

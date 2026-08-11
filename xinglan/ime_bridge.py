@@ -20,7 +20,7 @@ def _ime_process_main(connection: Connection) -> None:
     root.withdraw()
     root.overrideredirect(True)
     root.attributes("-topmost", True)
-    root.configure(bg="#1d2939")
+    root.configure(bg="#1d2939", cursor="arrow")
     buffer = tk.StringVar(value="")
     busy = False
     consume_job: str | None = None
@@ -33,6 +33,7 @@ def _ime_process_main(connection: Connection) -> None:
         borderwidth=0,
         highlightthickness=0,
         takefocus=True,
+        cursor="arrow",
     )
     entry.place(x=0, y=0, width=1, height=1)
 

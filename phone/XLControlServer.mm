@@ -21,6 +21,7 @@ static std::atomic_uint XLControlErrors(0);
 
 static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
 static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
+static const char *XLControlCenterOpenNotification = "com.jibeib.xlstream.controlcenter.open";
 
 static BOOL XLReadAll(int socketHandle, void *buffer, size_t length) {
     uint8_t *bytes = (uint8_t *)buffer;
@@ -156,6 +157,8 @@ static uint32_t XLHandleSystemAction(XLHIDSender *sender, const NSData *data) {
             return 5;
         case XLSystemActionAppSwitcher:
             return [sender sendAppSwitcher] ? 0 : 4;
+        case XLSystemActionControlCenter:
+            return notify_post(XLControlCenterOpenNotification) == NOTIFY_STATUS_OK ? 0 : 4;
     }
     return 3;
 }

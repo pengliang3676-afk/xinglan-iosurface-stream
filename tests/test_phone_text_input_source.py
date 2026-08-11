@@ -1,4 +1,6 @@
 from pathlib import Path
+import plistlib
+import re
 import unittest
 
 
@@ -42,20 +44,20 @@ class PhoneTextInputSourceTests(unittest.TestCase):
 
     def test_package_version_matches_app_version(self):
         control = (ROOT / "phone" / "control").read_text(encoding="utf-8")
-        info = (ROOT / "phone" / "layout" / "Applications" / "XLStream.app" / "Info.plist").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("Version: 0.5.4", control)
-        self.assertIn("<string>0.5.4</string>", info)
-        self.assertIn("<string>54</string>", info)
+        info_path = ROOT / "phone" / "layout" / "Applications" / "XLStream.app" / "Info.plist"
+        with info_path.open("rb") as stream:
+            info = plistlib.load(stream)
+        match = re.search(r"(?m)^Version:\s*(\S+)\s*$", control)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), info["CFBundleShortVersionString"])
+        self.assertGreater(int(info["CFBundleVersion"]), 0)
 
     def test_package_scripts_never_wait_for_launchctl(self):
         scripts = ROOT / "phone" / "layout" / "DEBIAN"
-        for name in ("postinst", "prerm"):
-            source = (scripts / name).read_text(encoding="utf-8")
-            self.assertNotIn("run_bounded", source)
-            self.assertNotRegex(source, r"(?m)^\s*wait\b")
-            self.assertIn("</dev/null >/dev/null 2>&1 &", source)
+        self.assertFalse(
+            any(scripts.iterdir()) if scripts.exists() else False,
+            "safe package must not contain dpkg scripts",
+        )
 
 
 if __name__ == "__main__":

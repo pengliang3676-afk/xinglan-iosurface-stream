@@ -29,6 +29,7 @@
 
 static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
 static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
+static const char *XLControlCenterOpenNotification = "com.jibeib.xlstream.controlcenter.open";
 static const char *XLTextInsertNotification = "com.jibeib.xlstream.text.insert";
 static const char *XLTextPasteBeginNotification = "com.jibeib.xlstream.text.paste.begin";
 static const char *XLTextPasteChunkNotification = "com.jibeib.xlstream.text.paste.chunk";
@@ -166,6 +167,25 @@ static void XLLockScreen(void) {
     }
 }
 
+static BOOL XLOpenControlCenter(void) {
+    id controller = XLShared(NSClassFromString(@"SBControlCenterController"));
+    if (!controller) return NO;
+
+    SEL selector = NSSelectorFromString(@"presentAnimated:completion:");
+    if ([controller respondsToSelector:selector]) {
+        ((void (*)(id, SEL, BOOL, id))objc_msgSend)(
+            controller, selector, YES, nil);
+        return YES;
+    }
+
+    selector = NSSelectorFromString(@"presentAnimated:");
+    if ([controller respondsToSelector:selector]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(controller, selector, YES);
+        return YES;
+    }
+    return NO;
+}
+
 static void XLTextInputNotification(
     CFNotificationCenterRef center,
     void *observer,
@@ -296,6 +316,7 @@ static void XLTextInputNotification(
 static void XLRegisterSpringBoardActions(void) {
     int wakeToken = 0;
     int lockToken = 0;
+    int controlCenterToken = 0;
     notify_register_dispatch(XLScreenWakeNotification, &wakeToken,
                              dispatch_get_main_queue(), ^(int token) {
         (void)token;
@@ -305,6 +326,11 @@ static void XLRegisterSpringBoardActions(void) {
                              dispatch_get_main_queue(), ^(int token) {
         (void)token;
         XLLockScreen();
+    });
+    notify_register_dispatch(XLControlCenterOpenNotification, &controlCenterToken,
+                             dispatch_get_main_queue(), ^(int token) {
+        (void)token;
+        XLOpenControlCenter();
     });
 }
 

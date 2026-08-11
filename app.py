@@ -25,6 +25,7 @@ from xinglan.device_actions import (  # noqa: E402
 )
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
+from xinglan.ime_worker_client import ImeWorkerClient  # noqa: E402
 from xinglan.keyboard_input import map_keypress  # noqa: E402
 from xinglan.diagnostics import (  # noqa: E402
     ProcessLoadSampler,
@@ -113,11 +114,16 @@ class DeviceTile:
             highlightthickness=1,
             highlightbackground="#344054",
         )
-        # 复刻旧版星澜卡片：20px 标题栏在画面上方，36px 操作栏贯穿整卡。
+        # 复刻旧版星澜卡片：20px 标题栏在画面上方，操作栏贯穿整卡。
+        # 高频单机操作放在右侧，沿用用户更熟悉的旧版视觉顺序。
         # 手机画面一直铺到卡片底部，状态不再额外占用一整行高度。
         self.title_row = tk.Frame(self.frame, bg="#050c16")
         self.title_row.place(
-            x=0, y=0, relwidth=1, width=-SIDE_RAIL_WIDTH, height=PHONE_HEAD_HEIGHT
+            x=0,
+            y=0,
+            relwidth=1,
+            width=-SIDE_RAIL_WIDTH,
+            height=PHONE_HEAD_HEIGHT,
         )
         self.title = tk.Label(
             self.title_row,
@@ -206,11 +212,40 @@ class DeviceTile:
             padx=1, pady=4, font=("Microsoft YaHei UI", 8),
         )
         self.stop_button.pack(fill="x", padx=3, pady=2)
-        tk.Button(
-            self.side, text="掉线", state="disabled",
-            bg="#1d2939", fg="#667085", relief="flat",
-            padx=1, pady=4, font=("Microsoft YaHei UI", 8),
-        ).pack(fill="x", padx=3, pady=2)
+        self.single_action_buttons: list[tk.Button] = []
+        for text, command in (
+            (
+                "主屏",
+                lambda: self.owner.route_single_system_action(
+                    self.session, SystemAction.HOME
+                ),
+            ),
+            (
+                "切换",
+                lambda: self.owner.route_single_system_action(
+                    self.session, SystemAction.APP_SWITCHER
+                ),
+            ),
+            (
+                "控制",
+                lambda: self.owner.open_single_control_center(self.session),
+            ),
+        ):
+            button = tk.Button(
+                self.side,
+                text=text,
+                command=command,
+                bg="#344054",
+                fg="white",
+                activebackground="#2e90fa",
+                activeforeground="white",
+                relief="flat",
+                padx=1,
+                pady=4,
+                font=("Microsoft YaHei UI", 8),
+            )
+            button.pack(fill="x", padx=3, pady=2)
+            self.single_action_buttons.append(button)
         self.image_item = self.canvas.create_image(0, 0, anchor="nw")
         self.status = tk.Label(
             self.frame, text="等待画面", bg="#1d2939", fg="#98a2b3",
@@ -263,6 +298,8 @@ class DeviceTile:
         self.start_button.configure(state="disabled" if connected else "normal")
         self.stop_button.configure(state="normal" if connected else "disabled")
         self.master_button.configure(state="normal" if connected else "disabled")
+        for button in self.single_action_buttons:
+            button.configure(state="normal" if connected else "disabled")
 
     def refresh(self) -> None:
         sequence, _, image = self.session.latest.snapshot()
@@ -336,7 +373,6 @@ class DeviceTile:
         return (event.x - left) / (right - left), (event.y - top) / (bottom - top)
 
     def _press(self, event: tk.Event) -> None:
-        self.canvas.focus_set()
         point = self._normalized(event)
         if point is None:
             return
@@ -372,6 +408,12 @@ class DeviceTile:
         point = self._normalized(event)
         if point is not None:
             self.owner.route_touch(self.session, 0, *point, from_master=False)
+        self.owner.activate_ime(
+            self.session,
+            from_master=False,
+            screen_x=event.x_root,
+            screen_y=event.y_root,
+        )
 
 
 class EmptySlot:
@@ -426,7 +468,7 @@ class EmptySlot:
             side, text=f"{index + 1:02d}", bg="#111827", fg="#98a2b3",
             font=("Microsoft YaHei UI", 9, "bold")
         ).pack(pady=(5, 8))
-        for label in ("主控", "开始", "停止", "掉线"):
+        for label in ("主控", "开始", "停止", "主屏", "切换", "控制"):
             tk.Button(
                 side, text=label, state="disabled",
                 bg="#1d2939", fg="#667085", relief="flat",
@@ -587,7 +629,6 @@ class MasterView:
     def _press(self, event: tk.Event) -> None:
         if self.session is None:
             return
-        self.canvas.focus_set()
         point = self._normalized(event)
         if point is None:
             return
@@ -625,6 +666,12 @@ class MasterView:
         point = self._normalized(event)
         if point is not None:
             self.owner.route_touch(self.session, 0, *point, from_master=True)
+        self.owner.activate_ime(
+            self.session,
+            from_master=True,
+            screen_x=event.x_root,
+            screen_y=event.y_root,
+        )
 
 
 class XinglanApp:
@@ -671,6 +718,13 @@ class XinglanApp:
         except tk.TclError:
             pass
         root.protocol("WM_DELETE_WINDOW", self.close)
+        self._ime_source: DeviceSession | None = None
+        self._ime_from_master = False
+        self.ime_worker = ImeWorkerClient(
+            root,
+            on_text=self._route_ime_text,
+            on_key=self._route_ime_key,
+        )
 
         # 严格复用旧版网页的 64px 顶栏和右侧 600px 操作区。
         toolbar = tk.Frame(root, bg="#1d2939", height=TOP_BAR_HEIGHT)
@@ -815,20 +869,48 @@ class XinglanApp:
         group_row.pack(fill="x", padx=8, pady=(8, 4))
         group_row.pack_propagate(False)
         self.group_var = tk.StringVar(value="第1组")
-        self.group_combo = ttk.Combobox(
-            group_row, textvariable=self.group_var,
-            values=["第1组"], state="readonly", width=7,
+        self.group_combo = tk.Menubutton(
+            group_row,
+            textvariable=self.group_var,
+            # 与原生菜单展开后的实际宽度一致，保证上下左右边缘对齐。
+            width=8,
+            anchor="w",
+            bg="#f2f4f7",
+            fg="#101828",
+            activebackground="#f2f4f7",
+            activeforeground="#101828",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=7,
+            takefocus=False,
+            font=("Microsoft YaHei UI", 10),
         )
+        self.group_menu = tk.Menu(
+            self.group_combo,
+            tearoff=False,
+            bg="#f2f4f7",
+            fg="#101828",
+            activebackground="#2e90fa",
+            activeforeground="white",
+            relief="flat",
+            borderwidth=1,
+            font=("Microsoft YaHei UI", 10),
+        )
+        self.group_combo.configure(menu=self.group_menu)
         self.group_combo.pack(side="left", fill="y", padx=(0, 7))
-        self.group_combo.bind("<<ComboboxSelected>>", self._group_changed)
+        self._set_group_menu_values(["第1组"])
         self.group_button = tk.Button(
             group_row, text="连接本组", command=self.toggle_current_group,
-            bg="#12b76a", fg="white", relief="flat", borderwidth=0,
+            bg="#12b76a", fg="white",
+            activebackground="#12b76a", activeforeground="white",
+            relief="flat", borderwidth=0, highlightthickness=0,
+            takefocus=False,
             font=("Microsoft YaHei UI", 10, "bold"),
         )
         self.group_button.pack(side="left", fill="both", expand=True)
 
-        # 键盘事件由投屏画布直接接收，不创建输入框或常驻IME进程。
+        # 键盘输入由独立的轻量IME进程接收；它不加载投屏或分组代码。
 
         for text, command in (
             ("切换窗口", self.switch_window),
@@ -978,10 +1060,26 @@ class XinglanApp:
     def _refresh_group_selector(self) -> None:
         values = [f"第{index}组" for index in range(1, self.max_groups + 1)]
         current = min(self._current_group_index(), self.max_groups - 1)
-        self.group_combo.configure(values=values)
+        self._set_group_menu_values(values)
         self.group_var.set(values[current])
 
+    def _set_group_menu_values(self, values: list[str]) -> None:
+        self.group_menu.delete(0, "end")
+        for value in values:
+            self.group_menu.add_command(
+                label=value,
+                command=lambda selected=value: self._select_group(selected),
+            )
+
+    def _select_group(self, value: str) -> None:
+        if self.group_var.get() == value:
+            return
+        self.group_var.set(value)
+        self._group_changed()
+
     def _group_changed(self, _event: tk.Event | None = None) -> None:
+        self.ime_worker.deactivate()
+        self._ime_source = None
         self.master_udid = None
         self._rebuild_tiles()
         self.summary.set(
@@ -990,9 +1088,11 @@ class XinglanApp:
 
     def _refresh_group_button(self) -> None:
         connected = any(udid in self.active_udids for udid in self._current_group_udids())
+        color = "#912f20" if connected else "#12b76a"
         self.group_button.configure(
             text="断开本组" if connected else "连接本组",
-            bg="#912f20" if connected else "#12b76a",
+            bg=color,
+            activebackground=color,
         )
 
     def open_group_settings(self) -> None:
@@ -1299,6 +1399,31 @@ class XinglanApp:
         accepted = sum(1 for session in targets if session.send_system_action(action))
         self.summary.set(f"已向 {accepted}/{len(targets)} 台发送系统操作")
 
+    def route_single_system_action(
+        self,
+        session: DeviceSession,
+        action: SystemAction,
+    ) -> None:
+        """Run a small-window shortcut on exactly one phone."""
+        if session.udid not in self.active_udids:
+            self.summary.set("这台手机尚未开始投屏")
+            return
+        labels = {
+            SystemAction.HOME: "主屏幕",
+            SystemAction.APP_SWITCHER: "App切换器",
+            SystemAction.CONTROL_CENTER: "控制中心",
+        }
+        if session.send_system_action(action):
+            self.summary.set(
+                f"已向 {self.device_label(session.udid)} 发送{labels.get(action, '系统操作')}"
+            )
+        else:
+            self.summary.set("单机快捷操作未发送：请确认该手机正在投屏")
+
+    def open_single_control_center(self, session: DeviceSession) -> None:
+        """Ask SpringBoard to open Control Center on exactly one phone."""
+        self.route_single_system_action(session, SystemAction.CONTROL_CENTER)
+
     def switch_window(self) -> None:
         self.route_system_action(SystemAction.APP_SWITCHER)
 
@@ -1325,6 +1450,7 @@ class XinglanApp:
         selected_path = tk.StringVar(value="")
         selected_text = tk.StringVar(value="尚未选择文件")
         target_text = tk.StringVar()
+        target_count_text = tk.StringVar()
         progress_text = tk.StringVar(value="请选择文件后开始传输")
         import_photo = tk.BooleanVar(value=False)
         transferring = tk.BooleanVar(value=False)
@@ -1335,12 +1461,16 @@ class XinglanApp:
         def refresh_target_text() -> None:
             targets = current_targets()
             if targets:
-                labels = "、".join(self.device_label(udid) for udid in targets[:5])
-                if len(targets) > 5:
-                    labels += f" 等{len(targets)}台"
+                # 数量单独使用醒目的大号字体；目标较多时少展示一个名称，
+                # 给右侧数量留出稳定空间，避免窗口宽度变化。
+                labels = "、".join(self.device_label(udid) for udid in targets[:4])
+                if len(targets) > 4:
+                    labels += "…"
                 target_text.set(f"接收目标：{labels}")
+                target_count_text.set(f"{len(targets)} 台")
             else:
                 target_text.set("接收目标：尚未选择主控或同步手机")
+                target_count_text.set("")
 
         def choose_file() -> None:
             value = filedialog.askopenfilename(
@@ -1472,13 +1602,24 @@ class XinglanApp:
             activeforeground="white",
             selectcolor="#2e90fa",
         ).pack(anchor="w", padx=20, pady=(18, 8))
+        target_row = tk.Frame(window, bg="#101828")
+        target_row.pack(fill="x", padx=20, pady=4)
         tk.Label(
-            window,
+            target_row,
+            textvariable=target_count_text,
+            bg="#101828",
+            fg="#fdb022",
+            font=("Microsoft YaHei UI", 15, "bold"),
+            anchor="e",
+        # 与下方右侧“开始传输”按钮的中心位置对齐。
+        ).pack(side="right", padx=(12, 30))
+        tk.Label(
+            target_row,
             textvariable=target_text,
             bg="#101828",
             fg="#d0d5dd",
             anchor="w",
-        ).pack(fill="x", padx=20, pady=4)
+        ).pack(side="left", fill="x", expand=True)
         tk.Label(
             window,
             textvariable=progress_text,
@@ -1686,9 +1827,10 @@ class XinglanApp:
         else:
             targets = [source]
         accepted = sum(1 for session in targets if session.send_touch(kind, x, y))
-        if kind in (0, 1):
-            sync_text = "开" if self.sync_enabled.get() and from_master else "关"
-            self.summary.set(f"已向 {accepted}/{len(targets)} 台发送触摸 · 同步群控={sync_text}")
+        # 鼠标按下、移动和松开都是高频事件。正常发送时不改Tk状态文字，
+        # 避免右侧分组下拉框和按钮跟随每次操作反复重绘、闪动。
+        if accepted == 0 and kind in (0, 1):
+            self.summary.set("鼠标操作未发送：请确认该手机正在投屏")
 
     def _keyboard_targets(
         self, source: DeviceSession, *, from_master: bool
@@ -1706,6 +1848,46 @@ class XinglanApp:
         )
         return targets
 
+    def activate_ime(
+        self,
+        source: DeviceSession,
+        *,
+        from_master: bool,
+        screen_x: int,
+        screen_y: int,
+    ) -> None:
+        if source.udid not in self.active_udids:
+            return
+        self._ime_source = source
+        self._ime_from_master = from_master
+        self.ime_worker.activate(screen_x + 8, screen_y + 28)
+
+    def _route_ime_text(self, text: str) -> None:
+        source = self._ime_source
+        if source is None or source.udid not in self.active_udids or not text:
+            return
+        targets = self._keyboard_targets(
+            source,
+            from_master=self._ime_from_master,
+        )
+        accepted = sum(1 for session in targets if session.send_text(text))
+        if accepted == 0:
+            self.summary.set("键盘输入未发送：请确认该手机正在投屏")
+
+    def _route_ime_key(self, page: int, usage: int, _label: str) -> None:
+        source = self._ime_source
+        if source is None or source.udid not in self.active_udids:
+            return
+        targets = self._keyboard_targets(
+            source,
+            from_master=self._ime_from_master,
+        )
+        accepted = sum(
+            1 for session in targets if session.send_key(page, usage, 0)
+        )
+        if accepted == 0:
+            self.summary.set("键盘按键未发送：请确认该手机正在投屏")
+
     def route_keypress(
         self,
         source: DeviceSession,
@@ -1714,6 +1896,17 @@ class XinglanApp:
         *,
         from_master: bool,
     ) -> str | None:
+        # Printable characters use the Unicode HID path one character at a
+        # time.  Third-party iOS editors (notably Baidu Express) can ignore
+        # synthetic keyboard scan codes while still accepting Unicode HID
+        # events.  This remains direct typing: there is no visible PC input
+        # box, clipboard mutation, or foreground tweak involved.
+        if len(char) == 1 and char.isprintable():
+            targets = self._keyboard_targets(source, from_master=from_master)
+            accepted = sum(1 for session in targets if session.send_text(char))
+            if accepted == 0:
+                self.summary.set("键盘输入未发送：请确认该手机正在投屏")
+            return "break"
         stroke = map_keypress(keysym, char)
         if stroke is None:
             return "break"
@@ -1830,6 +2023,7 @@ class XinglanApp:
 
     def close(self) -> None:
         self._closing = True
+        self.ime_worker.close()
         if (
             self.stability_monitor is not None
             and self.stability_monitor.sample_count

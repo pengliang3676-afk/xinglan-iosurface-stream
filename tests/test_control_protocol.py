@@ -77,6 +77,7 @@ class ControlProtocolTests(unittest.TestCase):
     def test_control_commands_have_sequences(self) -> None:
         home = pack_system_action(SystemAction.HOME, 41)
         switcher = pack_system_action(SystemAction.APP_SWITCHER, 43)
+        control_center = pack_system_action(SystemAction.CONTROL_CENTER, 44)
         keyframe = pack_keyframe_request(42)
         self.assertEqual(MessageType.SYSTEM_ACTION, unpack_header(home[:HEADER.size]).message_type)
         self.assertEqual(41, unpack_header(home[:HEADER.size]).sequence)
@@ -84,6 +85,11 @@ class ControlProtocolTests(unittest.TestCase):
         self.assertEqual(42, unpack_header(keyframe[:HEADER.size]).sequence)
         self.assertEqual(MessageType.SYSTEM_ACTION, unpack_header(switcher[:HEADER.size]).message_type)
         self.assertEqual(43, unpack_header(switcher[:HEADER.size]).sequence)
+        self.assertEqual(
+            MessageType.SYSTEM_ACTION,
+            unpack_header(control_center[:HEADER.size]).message_type,
+        )
+        self.assertEqual(44, unpack_header(control_center[:HEADER.size]).sequence)
 
     def test_text_input_is_utf8_and_key_event_has_usage(self) -> None:
         text = pack_text_input("鹰眼中文🙂", 51)
