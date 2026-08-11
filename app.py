@@ -88,17 +88,17 @@ def make_checkbox_icon(master: tk.Misc, size: int, checked: bool) -> ImageTk.Pho
         width=2 * scale,
     )
     if checked:
+        # Keep the check mark centred when the icon size changes.  The old
+        # coordinates were fixed for a 20 px icon, so enlarging the box left
+        # the mark stuck in its upper-left corner.
+        tick_points = tuple(
+            round(value * size * scale)
+            for value in (0.20, 0.50, 0.40, 0.70, 0.80, 0.30)
+        )
         draw.line(
-            (
-                4 * scale,
-                10 * scale,
-                8 * scale,
-                14 * scale,
-                16 * scale,
-                6 * scale,
-            ),
+            tick_points,
             fill="white",
-            width=2 * scale,
+            width=max(2, round(size * 0.10)) * scale,
             joint="curve",
         )
     image = image.resize((size, size), Image.Resampling.LANCZOS)
@@ -197,14 +197,14 @@ class DeviceTile:
             padx=0,
             pady=0,
         )
-        self.selection_check.pack(fill="x", padx=3, pady=(2, 1))
         tk.Label(
             self.side,
             text=f"{index + 1:02d}",
             bg="#111827",
             fg="white",
             font=("Microsoft YaHei UI", TILE_NUMBER_FONT_SIZE, "bold"),
-        ).pack(fill="x", padx=3, pady=(0, 5), ipady=2)
+        ).pack(fill="x", padx=3, pady=(2, 0), ipady=2)
+        self.selection_check.pack(fill="x", padx=3, pady=(0, 5))
         self.master_button = tk.Button(
             self.side,
             text="主控",
