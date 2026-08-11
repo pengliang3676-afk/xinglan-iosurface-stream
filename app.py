@@ -103,6 +103,7 @@ class NativeTitleOverlay:
         self.root = root
         self.rel_x = rel_x
         self._after_id: str | None = None
+        self._raise_after_id: str | None = None
         self._last_geometry: str | None = None
         self._visible = False
         self.window = tk.Toplevel(root)
@@ -121,6 +122,7 @@ class NativeTitleOverlay:
         )
         root.bind("<Configure>", self._schedule_refresh, add="+")
         root.bind("<Map>", self._schedule_refresh, add="+")
+        root.bind("<FocusIn>", self._schedule_raise, add="+")
         root.bind("<Unmap>", self._hide, add="+")
         self._schedule_refresh()
 
@@ -138,6 +140,23 @@ class NativeTitleOverlay:
             except tk.TclError:
                 pass
         self._after_id = self.root.after(40, self._refresh)
+
+    def _schedule_raise(self, _event: tk.Event | None = None) -> None:
+        """Restore the caption overlay after Windows raises the main window."""
+        if self._raise_after_id is not None:
+            try:
+                self.root.after_cancel(self._raise_after_id)
+            except tk.TclError:
+                pass
+        self._raise_after_id = self.root.after(40, self._raise)
+
+    def _raise(self) -> None:
+        self._raise_after_id = None
+        try:
+            if self._visible and self.root.state() not in {"iconic", "withdrawn"}:
+                self.window.lift(self.root)
+        except tk.TclError:
+            self._hide()
 
     def _refresh(self) -> None:
         self._after_id = None
@@ -169,6 +188,8 @@ class NativeTitleOverlay:
                     height=self.HEIGHT,
                 )
                 self._last_geometry = geometry
+                if self._visible:
+                    self.window.lift(self.root)
             if not self._visible:
                 self.window.deiconify()
                 self.window.lift(self.root)
