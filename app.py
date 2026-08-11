@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
 import gc
 import logging
 import multiprocessing
@@ -9,9 +10,9 @@ import os
 import threading
 import tkinter as tk
 import tracemalloc
+from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from tkinter import font as tkfont
 
 from xinglan.bootstrap import PROJECT_DIR, configure_dependencies
 
@@ -90,22 +91,104 @@ SMALL_PLACEHOLDER_FONT = load_placeholder_font(13)
 MASTER_PLACEHOLDER_FONT = load_placeholder_font(15)
 
 
-def place_native_window_title(
-    root: tk.Tk,
-    text: str,
-    rel_x: float = BRAND_BANNER_REL_X,
-) -> None:
-    """Align the native Windows caption text above the toolbar brand centre."""
-    caption_font = tkfont.Font(root=root, family="Segoe UI", size=9)
-    spacer = "\u2003"
-    spacer_width = max(1, caption_font.measure(spacer))
-    text_width = caption_font.measure(text)
-    window_width = max(root.winfo_width(), root.winfo_screenwidth())
-    content_width = max(1, window_width - 20)
-    target_x = 10 + (content_width * rel_x)
-    native_text_origin = 28
-    padding_width = max(0, target_x - native_text_origin - (text_width / 2))
-    root.title((spacer * round(padding_width / spacer_width)) + text)
+class NativeTitleOverlay:
+    """Draw centred caption text without replacing the native Windows frame."""
+
+    WIDTH = 90
+    HEIGHT = 22
+
+    def __init__(self, root: tk.Tk, text: str, rel_x: float) -> None:
+        self.root = root
+        self.rel_x = rel_x
+        self._after_id: str | None = None
+        self.window = tk.Toplevel(root)
+        self.window.withdraw()
+        self.window.overrideredirect(True)
+        self.window.transient(root)
+        self.window.configure(bg="#f3f3f3")
+        tk.Label(
+            self.window,
+            text=text,
+            bg="#f3f3f3",
+            fg="#111111",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="both", expand=True)
+        root.bind("<Configure>", self._schedule_refresh, add="+")
+        root.bind("<Map>", self._schedule_refresh, add="+")
+        root.bind("<Unmap>", self._hide, add="+")
+        self._schedule_refresh()
+
+    def _hide(self, _event: tk.Event | None = None) -> None:
+        try:
+            self.window.withdraw()
+        except tk.TclError:
+            pass
+
+    def _schedule_refresh(self, _event: tk.Event | None = None) -> None:
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+        self._after_id = self.root.after(40, self._refresh)
+
+    def _refresh(self) -> None:
+        self._after_id = None
+        try:
+            if self.root.state() in {"iconic", "withdrawn"}:
+                self.window.withdraw()
+                return
+            self.root.update_idletasks()
+            outer_left, outer_top, client_left, client_top, client_width = (
+                self._window_metrics()
+            )
+            target_x = client_left + 10 + ((client_width - 20) * self.rel_x)
+            caption_height = max(self.HEIGHT, client_top - outer_top)
+            x = round(target_x - (self.WIDTH / 2))
+            y = round(outer_top + ((caption_height - self.HEIGHT) / 2))
+            self.window.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}")
+            self.window.deiconify()
+            self.window.lift(self.root)
+        except (OSError, tk.TclError):
+            self._hide()
+
+    def _window_metrics(self) -> tuple[int, int, int, int, int]:
+        if os.name != "nt":
+            client_left = self.root.winfo_rootx()
+            client_top = self.root.winfo_rooty()
+            return (
+                client_left,
+                client_top - 30,
+                client_left,
+                client_top,
+                self.root.winfo_width(),
+            )
+
+        user32 = ctypes.windll.user32
+        hwnd = wintypes.HWND(self.root.winfo_id())
+        user32.GetParent.argtypes = (wintypes.HWND,)
+        user32.GetParent.restype = wintypes.HWND
+        parent_hwnd = user32.GetParent(hwnd)
+        if parent_hwnd:
+            hwnd = parent_hwnd
+        outer = wintypes.RECT()
+        client = wintypes.RECT()
+        client_origin = wintypes.POINT(0, 0)
+        if not user32.GetWindowRect(hwnd, ctypes.byref(outer)):
+            raise OSError("GetWindowRect failed")
+        if not user32.GetClientRect(hwnd, ctypes.byref(client)):
+            raise OSError("GetClientRect failed")
+        if not user32.ClientToScreen(hwnd, ctypes.byref(client_origin)):
+            raise OSError("ClientToScreen failed")
+        return (
+            outer.left,
+            outer.top,
+            client_origin.x,
+            client_origin.y,
+            client.right - client.left,
+        )
 
 
 def make_checkbox_icon(master: tk.Misc, size: int, checked: bool) -> ImageTk.PhotoImage:
@@ -796,7 +879,11 @@ class XinglanApp:
             root.state("zoomed")
         except tk.TclError:
             pass
-        root.after_idle(lambda: place_native_window_title(root, "彭天霸"))
+        self.native_title_overlay = NativeTitleOverlay(
+            root,
+            "彭天霸",
+            BRAND_BANNER_REL_X,
+        )
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._ime_source: DeviceSession | None = None
         self._ime_from_master = False
