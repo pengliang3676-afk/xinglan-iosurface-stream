@@ -11,6 +11,7 @@ import tkinter as tk
 import tracemalloc
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 
 from xinglan.bootstrap import PROJECT_DIR, configure_dependencies
 
@@ -87,6 +88,24 @@ def load_placeholder_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.Image
 
 SMALL_PLACEHOLDER_FONT = load_placeholder_font(13)
 MASTER_PLACEHOLDER_FONT = load_placeholder_font(15)
+
+
+def place_native_window_title(
+    root: tk.Tk,
+    text: str,
+    rel_x: float = BRAND_BANNER_REL_X,
+) -> None:
+    """Align the native Windows caption text above the toolbar brand centre."""
+    caption_font = tkfont.Font(root=root, family="Segoe UI", size=9)
+    spacer = "\u2003"
+    spacer_width = max(1, caption_font.measure(spacer))
+    text_width = caption_font.measure(text)
+    window_width = max(root.winfo_width(), root.winfo_screenwidth())
+    content_width = max(1, window_width - 20)
+    target_x = 10 + (content_width * rel_x)
+    native_text_origin = 28
+    padding_width = max(0, target_x - native_text_origin - (text_width / 2))
+    root.title((spacer * round(padding_width / spacer_width)) + text)
 
 
 def make_checkbox_icon(master: tk.Misc, size: int, checked: bool) -> ImageTk.PhotoImage:
@@ -766,7 +785,7 @@ class XinglanApp:
         self.health_tick = 0
         self._scan_in_progress = False
         self._closing = False
-        root.title("星澜")
+        root.title("")
         try:
             root.iconbitmap(default=str(PROJECT_DIR / "assets" / "xinglan.ico"))
         except tk.TclError:
@@ -777,6 +796,7 @@ class XinglanApp:
             root.state("zoomed")
         except tk.TclError:
             pass
+        root.after_idle(lambda: place_native_window_title(root, "彭天霸"))
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._ime_source: DeviceSession | None = None
         self._ime_from_master = False
