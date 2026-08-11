@@ -34,7 +34,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_layout_matches_starlan_card_structure(self) -> None:
         self.assertEqual(64, TOP_BAR_HEIGHT)
-        self.assertEqual(20, PHONE_HEAD_HEIGHT)
+        self.assertEqual(0, PHONE_HEAD_HEIGHT)
         self.assertEqual(44, SIDE_RAIL_WIDTH)
         self.assertEqual(3, WALL_GAP)
         self.assertEqual(360, RIGHT_PANEL_WIDTH)
