@@ -1,7 +1,0 @@
-#!/bin/sh
-
-# Never call launchctl from dpkg.  On some RootHide devices bootout/unload
-# blocks indefinitely and leaves both dpkg and apt locked.
-killall XLStreamLauncher >/dev/null 2>&1 || true
-killall xlstreamd >/dev/null 2>&1 || true
-exit 0

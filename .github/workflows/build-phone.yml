@@ -25,6 +25,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify package source safety
+        run: python3 -m unittest tests.test_phone_package_safety
+
       - name: Install Theos
         env:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
@@ -58,6 +61,85 @@ jobs:
           name: XLStream-${{ matrix.name }}
           path: output/*.deb
           if-no-files-found: error
+
+  verify-packages:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download RootHide package
+        uses: actions/download-artifact@v4
+        with:
+          name: XLStream-RootHide
+          path: packages
+
+      - name: Download Dopamine package
+        uses: actions/download-artifact@v4
+        with:
+          name: XLStream-Dopamine-Rootless
+          path: packages
+
+      - name: Verify built package metadata and scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=0
+          for package in packages/*.deb; do
+            count=$((count + 1))
+            verify_dir="$(mktemp -d)"
+            dpkg-deb --control "$package" "$verify_dir"
+            grep -qx 'Package: com.jibeib.xlstream.safe' "$verify_dir/control"
+            grep -qx 'Provides: com.jibeib.xlstream' "$verify_dir/control"
+            grep -qx 'Replaces: com.jibeib.xlstream' "$verify_dir/control"
+            ! grep -Eq '^(Conflicts|Breaks):' "$verify_dir/control"
+            for script in preinst postinst prerm postrm config; do
+              test ! -e "$verify_dir/$script"
+            done
+            dpkg-deb --fsys-tarfile "$package" | tar -tf - | grep -q 'XLStream.app/bin/xlstreamd'
+            dpkg-deb --fsys-tarfile "$package" | tar -tf - | grep -q 'XLSystemActions.dylib'
+          done
+          test "$count" -eq 2
+
+      - name: Verify Replaces migration bypasses legacy prerm
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          old="$root/old"
+          new="$root/new"
+          mkdir -p "$old/DEBIAN" "$old/opt/xlstream-migration-ci"
+          mkdir -p "$new/DEBIAN" "$new/opt/xlstream-migration-ci"
+          cat > "$old/DEBIAN/control" <<'EOF'
+          Package: com.jibeib.xlstream-ci-old
+          Version: 1.0
+          Architecture: all
+          Maintainer: XLStream CI
+          Description: migration test old package
+          EOF
+          cat > "$old/DEBIAN/prerm" <<'EOF'
+          #!/bin/sh
+          touch /tmp/xlstream-old-prerm-ran
+          exit 99
+          EOF
+          chmod 755 "$old/DEBIAN/prerm"
+          echo old > "$old/opt/xlstream-migration-ci/payload"
+          cat > "$new/DEBIAN/control" <<'EOF'
+          Package: com.jibeib.xlstream-ci-safe
+          Version: 2.0
+          Architecture: all
+          Maintainer: XLStream CI
+          Provides: com.jibeib.xlstream-ci-old
+          Replaces: com.jibeib.xlstream-ci-old
+          Description: migration test safe package
+          EOF
+          echo new > "$new/opt/xlstream-migration-ci/payload"
+          dpkg-deb --build "$old" "$root/old.deb"
+          dpkg-deb --build "$new" "$root/new.deb"
+          sudo dpkg -i "$root/old.deb"
+          sudo dpkg -i "$root/new.deb"
+          test ! -e /tmp/xlstream-old-prerm-ran
+          test "$(cat /opt/xlstream-migration-ci/payload)" = new
+          ! dpkg-query -W -f='${db:Status-Abbrev}' com.jibeib.xlstream-ci-old 2>/dev/null | grep -q '^ii'
+          sudo dpkg --purge com.jibeib.xlstream-ci-safe
 
   build-repair-ipa:
     runs-on: macos-15
