@@ -507,7 +507,11 @@ class PersistentDeviceActionHub:
             if channel is None:
                 return False
             try:
-                await asyncio.wait_for(channel.ready.wait(), timeout=1.0)
+                # A full 60-phone scan deliberately staggers initial USB
+                # setup over roughly 1.5 seconds.  If the user clicks during
+                # startup, wait for that one preparation pass instead of
+                # dropping the last phones or opening replacement sockets.
+                await asyncio.wait_for(channel.ready.wait(), timeout=3.0)
             except asyncio.TimeoutError:
                 return False
             result = asyncio.get_running_loop().create_future()
