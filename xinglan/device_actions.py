@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any
@@ -90,6 +90,7 @@ async def send_device_action_sequence(
     udid: str,
     actions: Iterable[str],
     timeout: float = 3.0,
+    should_continue: Callable[[], bool] | None = None,
 ) -> bool:
     system_actions: list[SystemAction] = []
     for action in actions:
@@ -99,6 +100,8 @@ async def send_device_action_sequence(
         system_actions.append(system_action)
     if not system_actions:
         return True
+    if should_continue is not None and not should_continue():
+        return False
 
     connection: Any | None = None
     try:
@@ -125,6 +128,10 @@ async def send_device_action_sequence(
         unpack_hello(hello_payload)
 
         for action_sequence, system_action in enumerate(system_actions, start=2):
+            # A later power command (especially SLEEP) invalidates an older
+            # WAKE/HOME sequence.  Never let its delayed HOME overtake sleep.
+            if should_continue is not None and not should_continue():
+                return False
             await asyncio.wait_for(
                 connection.sendall(
                     pack_system_action(system_action, action_sequence)
@@ -183,6 +190,7 @@ async def send_action_to_devices(
 async def send_action_sequence_to_devices(
     udids: Iterable[str],
     actions: Iterable[str],
+    should_continue: Callable[[], bool] | None = None,
 ) -> dict[str, bool]:
     ordered = list(dict.fromkeys(udids))
     sequence = list(actions)
@@ -190,7 +198,13 @@ async def send_action_sequence_to_devices(
 
     async def send_one(udid: str) -> bool:
         async with semaphore:
-            return await send_device_action_sequence(udid, sequence)
+            if should_continue is None:
+                return await send_device_action_sequence(udid, sequence)
+            return await send_device_action_sequence(
+                udid,
+                sequence,
+                should_continue=should_continue,
+            )
 
     results = await asyncio.gather(
         *(send_one(udid) for udid in ordered),
@@ -206,6 +220,7 @@ async def send_legacy_device_action(
     udid: str,
     action: str,
     timeout: float = 2.5,
+    should_continue: Callable[[], bool] | None = None,
 ) -> bool:
     """Send the same fire-and-close command as the legacy browser backend."""
     payload = LEGACY_COMMAND_BYTES.get(action)
@@ -214,6 +229,8 @@ async def send_legacy_device_action(
 
     connection: Any | None = None
     try:
+        if should_continue is not None and not should_continue():
+            return False
         connection = await asyncio.wait_for(
             ServiceConnection.create_using_usbmux(
                 udid,
@@ -222,6 +239,8 @@ async def send_legacy_device_action(
             ),
             timeout=timeout,
         )
+        if should_continue is not None and not should_continue():
+            return False
         await asyncio.wait_for(connection.sendall(payload), timeout=timeout)
         return True
     except Exception:
@@ -237,13 +256,24 @@ async def send_legacy_device_action(
 async def send_legacy_action_to_devices(
     udids: Iterable[str],
     action: str,
+    should_continue: Callable[[], bool] | None = None,
 ) -> dict[str, bool]:
     """Mirror Promise.all from the legacy browser backend for all USB phones."""
     ordered = list(dict.fromkeys(udids))
-    results = await asyncio.gather(
-        *(send_legacy_device_action(udid, action) for udid in ordered),
-        return_exceptions=True,
-    )
+    if should_continue is None:
+        operations = (
+            send_legacy_device_action(udid, action) for udid in ordered
+        )
+    else:
+        operations = (
+            send_legacy_device_action(
+                udid,
+                action,
+                should_continue=should_continue,
+            )
+            for udid in ordered
+        )
+    results = await asyncio.gather(*operations, return_exceptions=True)
     return {
         udid: bool(result) if not isinstance(result, BaseException) else False
         for udid, result in zip(ordered, results)
@@ -252,6 +282,7 @@ async def send_legacy_action_to_devices(
 
 async def send_reliable_wake_to_devices(
     udids: Iterable[str],
+    should_continue: Callable[[], bool] | None = None,
 ) -> dict[str, bool]:
     """Wake instantly, verify the display, then return every phone home.
 
@@ -267,16 +298,62 @@ async def send_reliable_wake_to_devices(
     ordered = list(dict.fromkeys(udids))
     # Start both wake paths in the same event-loop turn.  Do not wait before
     # the verified path: that delay was visible on phones missed by port 6000.
-    legacy_task = asyncio.create_task(
-        send_legacy_action_to_devices(ordered, "wake")
-    )
-    completed_result = await send_action_sequence_to_devices(
-        ordered,
-        ["wake", "home"],
-    )
+    if should_continue is None:
+        legacy_operation = send_legacy_action_to_devices(ordered, "wake")
+        completed_operation = send_action_sequence_to_devices(
+            ordered,
+            ["wake", "home"],
+        )
+    else:
+        legacy_operation = send_legacy_action_to_devices(
+            ordered,
+            "wake",
+            should_continue=should_continue,
+        )
+        completed_operation = send_action_sequence_to_devices(
+            ordered,
+            ["wake", "home"],
+            should_continue=should_continue,
+        )
+    legacy_task = asyncio.create_task(legacy_operation)
+    completed_result = await completed_operation
     legacy_result = await legacy_task
     return {
         udid: bool(completed_result.get(udid) or legacy_result.get(udid))
+        for udid in ordered
+    }
+
+
+async def send_reliable_sleep_to_devices(
+    udids: Iterable[str],
+    should_continue: Callable[[], bool] | None = None,
+) -> dict[str, bool]:
+    """Lock every phone quickly and verify missed devices on the new channel.
+
+    Port 6000 preserves the legacy all-at-once behaviour.  The acknowledged
+    XLStream action runs in the same event-loop turn and repairs phones whose
+    legacy write was accepted by USB but not handled by the phone.
+    """
+    ordered = list(dict.fromkeys(udids))
+    if should_continue is None:
+        legacy_operation = send_legacy_action_to_devices(ordered, "sleep")
+        verified_operation = send_action_to_devices(ordered, "sleep")
+    else:
+        legacy_operation = send_legacy_action_to_devices(
+            ordered,
+            "sleep",
+            should_continue=should_continue,
+        )
+        verified_operation = send_action_sequence_to_devices(
+            ordered,
+            ["sleep"],
+            should_continue=should_continue,
+        )
+    legacy_task = asyncio.create_task(legacy_operation)
+    verified_result = await verified_operation
+    legacy_result = await legacy_task
+    return {
+        udid: bool(verified_result.get(udid) or legacy_result.get(udid))
         for udid in ordered
     }
 

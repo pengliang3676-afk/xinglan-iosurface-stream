@@ -26,6 +26,7 @@ from xinglan.device_actions import (
     send_device_action_sequence,
     send_legacy_action_to_devices,
     send_legacy_device_action,
+    send_reliable_sleep_to_devices,
     send_reliable_wake_to_devices,
 )
 
@@ -119,6 +120,40 @@ class DeviceActionTests(unittest.TestCase):
         )
         self.assertTrue(connection.closed)
 
+    def test_cancelled_wake_sequence_never_sends_late_home(self) -> None:
+        hello = HELLO.pack(0x3F, 360, 640, PROTOCOL_VERSION, 0)
+        response = b"".join(
+            [
+                pack_message(CONTROL_MAGIC, MessageType.HELLO_ACK, 1, hello),
+                pack_message(CONTROL_MAGIC, MessageType.ACK, 2, ACK.pack(2, 0)),
+            ]
+        )
+        connection = FakeConnection(response)
+        create = AsyncMock(return_value=connection)
+        checks = iter([True, True, False])
+        with patch(
+            "xinglan.device_actions.ServiceConnection.create_using_usbmux",
+            new=create,
+        ):
+            result = asyncio.run(
+                send_device_action_sequence(
+                    "device-01",
+                    ["wake", "home"],
+                    should_continue=lambda: next(checks),
+                )
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(2, len(connection.payloads))
+        self.assertEqual(
+            [MessageType.HELLO, MessageType.SYSTEM_ACTION],
+            [
+                unpack_header(payload[: HEADER.size], CONTROL_MAGIC).message_type
+                for payload in connection.payloads
+            ],
+        )
+        self.assertTrue(connection.closed)
+
     def test_rejected_action_returns_false(self) -> None:
         hello = HELLO.pack(0x3F, 360, 640, PROTOCOL_VERSION, 0)
         response = b"".join(
@@ -203,6 +238,21 @@ class DeviceActionTests(unittest.TestCase):
             result = asyncio.run(send_reliable_wake_to_devices(["old", "new"]))
 
         self.assertEqual(result, {"old": True, "new": True})
+
+    def test_reliable_sleep_uses_legacy_speed_and_verified_fallback(self) -> None:
+        legacy = AsyncMock(return_value={"a": True, "b": False, "c": True})
+        verified = AsyncMock(return_value={"a": True, "b": True, "c": False})
+        with (
+            patch("xinglan.device_actions.send_legacy_action_to_devices", new=legacy),
+            patch("xinglan.device_actions.send_action_to_devices", new=verified),
+        ):
+            result = asyncio.run(
+                send_reliable_sleep_to_devices(["a", "b", "a", "c"])
+            )
+
+        self.assertEqual(result, {"a": True, "b": True, "c": True})
+        legacy.assert_awaited_once_with(["a", "b", "c"], "sleep")
+        verified.assert_awaited_once_with(["a", "b", "c"], "sleep")
 
     def test_identify_sleeps_then_wakes_phone_once(self) -> None:
         sender = AsyncMock(return_value=True)
