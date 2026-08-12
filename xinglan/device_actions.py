@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -43,11 +42,6 @@ LEGACY_COMMAND_BYTES = {
     "wake": b"14\r\n",
     "sleep": b"15\r\n",
 }
-
-LOGGER = logging.getLogger(__name__)
-LEGACY_CONNECT_CONCURRENCY = 8
-LEGACY_CONNECT_ATTEMPTS = 4
-LEGACY_CONNECT_RETRY_DELAY = 0.12
 
 
 @dataclass
@@ -264,76 +258,26 @@ async def send_legacy_action_to_devices(
     action: str,
     should_continue: Callable[[], bool] | None = None,
 ) -> dict[str, bool]:
-    """Prepare every USB channel, then broadcast one legacy command together.
-
-    Starting 60 usbmux connection handshakes in one instant intermittently
-    returns Result/Number 3 before any command reaches the phone.  Connection
-    preparation is therefore bounded and retried, but the control payload is
-    still sent exactly once per phone after all available channels are ready.
-    There is no phone-state confirmation and no second control command.
-    """
+    """Mirror Promise.all from the legacy browser backend for all USB phones."""
     ordered = list(dict.fromkeys(udids))
-    payload = LEGACY_COMMAND_BYTES.get(action)
-    if payload is None:
-        raise ValueError(f"不支持的旧版手机动作：{action}")
-    semaphore = asyncio.Semaphore(LEGACY_CONNECT_CONCURRENCY)
-    connections: dict[str, Any] = {}
-
-    async def prepare_one(udid: str) -> None:
-        for attempt in range(1, LEGACY_CONNECT_ATTEMPTS + 1):
-            if should_continue is not None and not should_continue():
-                return
-            connection: Any | None = None
-            try:
-                async with semaphore:
-                    connection = await asyncio.wait_for(
-                        ServiceConnection.create_using_usbmux(
-                            udid,
-                            LEGACY_CONTROL_PORT,
-                            connection_type="USB",
-                        ),
-                        timeout=2.5,
-                    )
-                connections[udid] = connection
-                return
-            except Exception as error:
-                if connection is not None:
-                    try:
-                        await connection.close()
-                    except Exception:
-                        pass
-                if attempt >= LEGACY_CONNECT_ATTEMPTS:
-                    LOGGER.warning(
-                        "legacy %s USB channel failed after %d attempts: %s (%s)",
-                        action,
-                        attempt,
-                        udid,
-                        error,
-                    )
-                    return
-                await asyncio.sleep(LEGACY_CONNECT_RETRY_DELAY * attempt)
-
-    await asyncio.gather(*(prepare_one(udid) for udid in ordered))
-
-    async def send_once(udid: str) -> bool:
-        connection = connections.get(udid)
-        if connection is None:
-            return False
-        try:
-            if should_continue is not None and not should_continue():
-                return False
-            await asyncio.wait_for(connection.sendall(payload), timeout=2.5)
-            return True
-        except Exception as error:
-            LOGGER.warning("legacy %s write failed: %s (%s)", action, udid, error)
-            return False
-
-    send_results = await asyncio.gather(*(send_once(udid) for udid in ordered))
-    await asyncio.gather(
-        *(connection.close() for connection in connections.values()),
-        return_exceptions=True,
-    )
-    return dict(zip(ordered, send_results))
+    if should_continue is None:
+        operations = (
+            send_legacy_device_action(udid, action) for udid in ordered
+        )
+    else:
+        operations = (
+            send_legacy_device_action(
+                udid,
+                action,
+                should_continue=should_continue,
+            )
+            for udid in ordered
+        )
+    results = await asyncio.gather(*operations, return_exceptions=True)
+    return {
+        udid: bool(result) if not isinstance(result, BaseException) else False
+        for udid, result in zip(ordered, results)
+    }
 
 
 async def send_reliable_wake_to_devices(

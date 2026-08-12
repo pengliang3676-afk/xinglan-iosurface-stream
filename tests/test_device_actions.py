@@ -201,37 +201,14 @@ class DeviceActionTests(unittest.TestCase):
                 self.assertTrue(connection.closed)
 
     def test_legacy_top_buttons_broadcast_to_all_phones_together(self) -> None:
-        connections = [FakeConnection(), FakeConnection(), FakeConnection()]
-        create = AsyncMock(side_effect=connections)
-        with patch(
-            "xinglan.device_actions.ServiceConnection.create_using_usbmux",
-            new=create,
-        ):
+        sender = AsyncMock(return_value=True)
+        with patch("xinglan.device_actions.send_legacy_device_action", new=sender):
             result = asyncio.run(
                 send_legacy_action_to_devices(["a", "b", "a", "c"], "wake")
             )
 
         self.assertEqual(result, {"a": True, "b": True, "c": True})
-        self.assertEqual(create.await_count, 3)
-        self.assertTrue(all(connection.payloads == [b"14\r\n"] for connection in connections))
-        self.assertTrue(all(connection.closed for connection in connections))
-
-    def test_legacy_broadcast_retries_connections_but_sends_only_once(self) -> None:
-        connection = FakeConnection()
-        create = AsyncMock(side_effect=[OSError("usbmux busy"), connection])
-        with (
-            patch(
-                "xinglan.device_actions.ServiceConnection.create_using_usbmux",
-                new=create,
-            ),
-            patch("xinglan.device_actions.asyncio.sleep", new=AsyncMock()),
-        ):
-            result = asyncio.run(send_legacy_action_to_devices(["a"], "sleep"))
-
-        self.assertEqual(result, {"a": True})
-        self.assertEqual(create.await_count, 2)
-        self.assertEqual(connection.payloads, [b"15\r\n"])
-        self.assertTrue(connection.closed)
+        self.assertEqual(sender.await_count, 3)
 
     def test_reliable_wake_verifies_then_returns_every_phone_home(self) -> None:
         legacy = AsyncMock(return_value={"a": True, "b": True, "c": False})
