@@ -211,6 +211,32 @@ async def send_legacy_action_to_devices(
     }
 
 
+async def send_reliable_wake_to_devices(
+    udids: Iterable[str],
+    *,
+    verification_delay: float = 0.35,
+) -> dict[str, bool]:
+    """Wake instantly through the old channel, then verify through XLStream.
+
+    The legacy ``14`` command is fire-and-forget: a successful USB write does
+    not prove that the display actually woke.  The binary XLStream action waits
+    for the phone-side handler to check the display and apply its power/home
+    fallback.  Repeating wake this way is safe for an already-awake phone.
+
+    Plug-ins without the binary control channel retain the legacy result, so
+    the top button stays backwards compatible.
+    """
+    ordered = list(dict.fromkeys(udids))
+    legacy_result = await send_legacy_action_to_devices(ordered, "wake")
+    if verification_delay > 0:
+        await asyncio.sleep(verification_delay)
+    verified_result = await send_action_to_devices(ordered, "wake")
+    return {
+        udid: bool(verified_result.get(udid) or legacy_result.get(udid))
+        for udid in ordered
+    }
+
+
 class PersistentDeviceActionHub:
     """Keep one tiny control channel per USB phone for instant broadcasts.
 

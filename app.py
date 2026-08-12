@@ -24,6 +24,7 @@ from xinglan.device_discovery import discover_usb_udids_stable  # noqa: E402
 from xinglan.device_actions import (  # noqa: E402
     identify_physical_device,
     send_legacy_action_to_devices,
+    send_reliable_wake_to_devices,
 )
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
@@ -1249,7 +1250,24 @@ class XinglanApp:
         )
 
     def wake_all_devices(self) -> None:
-        self._run_all_device_action("wake", "全部开屏")
+        udids = self._all_online_udids()
+        if not udids:
+            self.summary.set("全部开屏：当前没有USB在线手机")
+            return
+        self.summary.set(f"全部开屏：正在唤醒并确认 {len(udids)} 台手机…")
+
+        def completed(result) -> None:
+            if isinstance(result, Exception):
+                self.summary.set(f"全部开屏失败：{result}")
+                return
+            succeeded = sum(1 for ok in result.values() if ok)
+            failed = len(result) - succeeded
+            self.summary.set(f"全部开屏：成功 {succeeded} 台，失败 {failed} 台")
+
+        self._run_async_action(
+            lambda: send_reliable_wake_to_devices(udids),
+            completed,
+        )
 
     def sleep_all_devices(self) -> None:
         self._run_all_device_action("sleep", "全部熄屏")

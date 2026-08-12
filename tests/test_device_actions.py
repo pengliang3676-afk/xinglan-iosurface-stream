@@ -24,6 +24,7 @@ from xinglan.device_actions import (
     send_device_action,
     send_legacy_action_to_devices,
     send_legacy_device_action,
+    send_reliable_wake_to_devices,
 )
 
 
@@ -136,6 +137,39 @@ class DeviceActionTests(unittest.TestCase):
 
         self.assertEqual(result, {"a": True, "b": True, "c": True})
         self.assertEqual(sender.await_count, 3)
+
+    def test_reliable_wake_uses_legacy_broadcast_then_verified_fallback(self) -> None:
+        legacy = AsyncMock(return_value={"a": True, "b": True, "c": False})
+        verified = AsyncMock(return_value={"a": True, "b": True, "c": True})
+        sleeper = AsyncMock()
+        with (
+            patch("xinglan.device_actions.send_legacy_action_to_devices", new=legacy),
+            patch("xinglan.device_actions.send_action_to_devices", new=verified),
+            patch("xinglan.device_actions.asyncio.sleep", new=sleeper),
+        ):
+            result = asyncio.run(
+                send_reliable_wake_to_devices(["a", "b", "a", "c"])
+            )
+
+        self.assertEqual(result, {"a": True, "b": True, "c": True})
+        legacy.assert_awaited_once_with(["a", "b", "c"], "wake")
+        verified.assert_awaited_once_with(["a", "b", "c"], "wake")
+        sleeper.assert_awaited_once_with(0.35)
+
+    def test_reliable_wake_keeps_legacy_compatibility(self) -> None:
+        legacy = AsyncMock(return_value={"old": True, "new": True})
+        verified = AsyncMock(return_value={"old": False, "new": True})
+        with (
+            patch("xinglan.device_actions.send_legacy_action_to_devices", new=legacy),
+            patch("xinglan.device_actions.send_action_to_devices", new=verified),
+        ):
+            result = asyncio.run(
+                send_reliable_wake_to_devices(
+                    ["old", "new"], verification_delay=0,
+                )
+            )
+
+        self.assertEqual(result, {"old": True, "new": True})
 
     def test_identify_sleeps_then_wakes_phone_once(self) -> None:
         sender = AsyncMock(return_value=True)
