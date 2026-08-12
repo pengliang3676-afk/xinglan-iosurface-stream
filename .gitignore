@@ -7,3 +7,5 @@ phone/obj/
 phone/packages/
 dist/
 .DS_Store
+.gh-config/
+.gh-local/
