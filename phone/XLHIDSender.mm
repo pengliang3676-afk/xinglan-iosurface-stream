@@ -54,9 +54,11 @@ typedef IOHIDEventRef (*XLUnicodeEventFn)(CFAllocatorRef,
                                          uint32_t,
                                          uint32_t);
 
-static const uint32_t XLDigitizerEventRange = 1u << 0;
 static const uint32_t XLDigitizerEventTouch = 1u << 1;
 static const uint32_t XLDigitizerEventPosition = 1u << 2;
+static const uint32_t XLDigitizerEventIdentity = 1u << 5;
+static const uint32_t XLDigitizerEventAttribute = 1u << 6;
+static const uint32_t XLDigitizerEventCancel = 1u << 7;
 static const uint32_t XLDigitizerMajorRadius = 0xB0014;
 static const uint32_t XLDigitizerMinorRadius = 0xB0015;
 static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
@@ -65,14 +67,22 @@ static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
 // otherwise IOHIDEventSystemClientDispatchEvent can accept the event while
 // SpringBoard silently ignores it.
 static const uint32_t XLEventFieldIsBuiltIn = 0x00000004;
-static const uint32_t XLDigitizerEventMask = 0xB0007;
-static const uint32_t XLDigitizerRange = 0xB0008;
-static const uint32_t XLDigitizerTouch = 0xB0009;
 static const uint32_t XLUnicodeEncodingUTF16LE = 1;
 // Known-good synthetic sender id used by TrollVNC/iOS HID generators on
 // iOS 14.8 through current releases. Without a sender id SpringBoard may
 // silently discard an otherwise valid dispatched event.
 static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
+
+// TrollVNC/STHIDEventGenerator uses these stable finger identifiers instead
+// of exposing the caller's zero-based slot directly to SpringBoard.
+static uint32_t XLTouchIdentifierForFinger(uint8_t finger) {
+    static const uint32_t identifiers[] = {
+        2, 3, 4, 5, 1, 6, 7, 8, 9, 10,
+    };
+    return finger < (sizeof(identifiers) / sizeof(identifiers[0]))
+        ? identifiers[finger]
+        : (uint32_t)finger + 1;
+}
 
 @implementation XLHIDSender {
     void *_ioKitHandle;
@@ -136,33 +146,37 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
     pressure = MAX(0.0, MIN(1.0, pressure));
 
     BOOL touching = phase == XLTouchPhaseDown || phase == XLTouchPhaseMove;
-    uint32_t childMask = 0;
+    uint32_t eventMask = 0;
     switch (phase) {
         case XLTouchPhaseDown:
-            childMask = XLDigitizerEventRange | XLDigitizerEventTouch;
+            eventMask = XLDigitizerEventTouch | XLDigitizerEventIdentity;
             break;
         case XLTouchPhaseMove:
-            childMask = XLDigitizerEventPosition;
+            eventMask = XLDigitizerEventPosition | XLDigitizerEventAttribute;
             break;
         case XLTouchPhaseUp:
-            childMask = XLDigitizerEventTouch;
+            eventMask = XLDigitizerEventTouch | XLDigitizerEventIdentity;
             break;
         case XLTouchPhaseCancel:
-            childMask = XLDigitizerEventTouch;
+            eventMask = XLDigitizerEventTouch | XLDigitizerEventIdentity |
+                XLDigitizerEventCancel;
             break;
     }
     uint64_t timestamp = mach_absolute_time();
-    uint32_t index = (uint32_t)finger;
-    // iOS' digitizer helpers use identity 3 for a finger transducer.  The
-    // index remains the caller's finger slot (normally 0).
-    uint32_t identity = 3;
+    uint32_t identifier = XLTouchIdentifierForFinger(finger);
+    // TrollVNC uses zero pressure for an ordinary finger.  The incoming
+    // protocol pressure is retained for compatibility but deliberately does
+    // not turn every mouse drag into a force/pressure gesture.
+    (void)pressure;
+    double pathPressure = 0.0;
+    double pathRadius = touching ? 5.0 : 0.0;
 
     IOHIDEventRef parent = _createDigitizerEvent(kCFAllocatorDefault,
                                                   timestamp,
                                                   3,
-                                                  99,
-                                                  1,
                                                   0,
+                                                  0,
+                                                  eventMask,
                                                   0,
                                                   0,
                                                   0.0,
@@ -174,14 +188,14 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
                                                   0);
     IOHIDEventRef child = _createFingerEvent(kCFAllocatorDefault,
                                               timestamp,
-                                              index,
-                                              identity,
-                                              childMask,
+                                              identifier,
+                                              identifier,
+                                              eventMask,
                                               x,
                                               y,
                                               0.0,
-                                              pressure,
-                                              0.0,
+                                              pathPressure,
+                                              90.0,
                                               touching,
                                               touching,
                                               0);
@@ -195,12 +209,9 @@ static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
     // digitizer event: SpringBoard filters out events without them.
     _setIntegerValue(parent, XLDigitizerIsDisplayIntegrated, 1);
     _setIntegerValue(parent, XLEventFieldIsBuiltIn, 1);
-    _setFloatValue(child, XLDigitizerMajorRadius, 0.04);
-    _setFloatValue(child, XLDigitizerMinorRadius, 0.04);
+    _setFloatValue(child, XLDigitizerMajorRadius, pathRadius);
+    _setFloatValue(child, XLDigitizerMinorRadius, pathRadius);
     _appendEvent(parent, child, 0);
-    _setIntegerValue(parent, XLDigitizerEventMask, 0x23);
-    _setIntegerValue(parent, XLDigitizerRange, 1);
-    _setIntegerValue(parent, XLDigitizerTouch, 1);
     _setSenderID(parent, XLSyntheticSenderID);
     _dispatchEvent(_client, parent);
     CFRelease(child);
