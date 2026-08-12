@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 static std::atomic_uint XLControlErrors(0);
+static const uint16_t XLLegacyControlPort = 6000;
 
 static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
 static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
@@ -272,4 +273,103 @@ void XLStartControlServer(void) {
 
 uint32_t XLControlErrorCount(void) {
     return XLControlErrors.load();
+}
+
+static void XLHandleLegacyLine(XLHIDSender *sender, NSString *line) {
+    if ([line isEqualToString:@"13"]) {
+        [sender sendHomeButton];
+        return;
+    }
+    if ([line isEqualToString:@"14"]) {
+        int state = XLScreenIsOn();
+        if (state != 1) {
+            [sender sendPowerButton];
+            usleep(350000);
+        }
+        [sender sendHomeButton];
+        return;
+    }
+    if ([line isEqualToString:@"15"]) {
+        if (XLScreenIsOn() != 0) [sender sendPowerButton];
+        return;
+    }
+    if ([line isEqualToString:@"16"]) {
+        [sender sendAppSwitcher];
+    }
+}
+
+static void XLHandleLegacyControlClient(int client) {
+    @autoreleasepool {
+        int enabled = 1;
+        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+        struct timeval timeout = {5, 0};
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        XLHIDSender *sender = [[XLHIDSender alloc] init];
+        NSMutableData *pending = [NSMutableData data];
+        uint8_t buffer[2048];
+        while (true) {
+            ssize_t received = recv(client, buffer, sizeof(buffer), 0);
+            if (received <= 0) break;
+            [pending appendBytes:buffer length:(NSUInteger)received];
+            while (pending.length >= 2) {
+                const uint8_t *bytes = (const uint8_t *)pending.bytes;
+                NSRange delimiter = NSMakeRange(NSNotFound, 0);
+                for (NSUInteger index = 0; index + 1 < pending.length; index++) {
+                    if (bytes[index] == '\r' && bytes[index + 1] == '\n') {
+                        delimiter = NSMakeRange(index, 2);
+                        break;
+                    }
+                }
+                if (delimiter.location == NSNotFound) {
+                    if (pending.length > 4096) [pending setLength:0];
+                    break;
+                }
+                NSData *lineData = [pending subdataWithRange:
+                    NSMakeRange(0, delimiter.location)];
+                [pending replaceBytesInRange:
+                    NSMakeRange(0, NSMaxRange(delimiter)) withBytes:NULL length:0];
+                NSString *line = [[NSString alloc] initWithData:lineData
+                                                       encoding:NSUTF8StringEncoding];
+                if (line.length) XLHandleLegacyLine(sender, line);
+            }
+        }
+        shutdown(client, SHUT_RDWR);
+        close(client);
+    }
+}
+
+static void XLRunLegacyControlCompatibilityServer(void) {
+    int server = socket(AF_INET, SOCK_STREAM, 0);
+    if (server < 0) return;
+    int enabled = 1;
+    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
+    struct sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons(XLLegacyControlPort);
+    // A bind failure means the original SpringBoard service is healthy.  Do
+    // not retry later and steal its port during a respring window.
+    if (bind(server, (struct sockaddr *)&address, sizeof(address)) != 0 ||
+        listen(server, 16) != 0) {
+        close(server);
+        return;
+    }
+    NSLog(@"[xlstreamd] legacy control compatibility listening on port %u",
+          XLLegacyControlPort);
+    while (true) {
+        int client = accept(server, NULL, NULL);
+        if (client < 0) continue;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+            XLHandleLegacyControlClient(client);
+        });
+    }
+}
+
+void XLStartLegacyControlCompatibilityServer(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            XLRunLegacyControlCompatibilityServer();
+        });
+    });
 }

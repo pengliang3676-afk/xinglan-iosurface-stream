@@ -20,6 +20,16 @@ def read_control() -> dict[str, str]:
 
 
 class PhonePackageSafetyTests(unittest.TestCase):
+    def test_daemon_supplies_legacy_power_port_without_stealing_healthy_service(self) -> None:
+        main = (PHONE / "main.mm").read_text(encoding="utf-8")
+        control = (PHONE / "XLControlServer.mm").read_text(encoding="utf-8")
+        self.assertIn("XLStartLegacyControlCompatibilityServer", main)
+        self.assertIn("XLLegacyControlPort = 6000", control)
+        self.assertIn("[line isEqualToString:@\"14\"]", control)
+        self.assertIn("[line isEqualToString:@\"15\"]", control)
+        self.assertIn("bind(server, (struct sockaddr *)&address", control)
+        self.assertEqual(1, control.count("XLRunLegacyControlCompatibilityServer();"))
+
     def test_safe_package_identity_replaces_legacy_package_without_conflict(self) -> None:
         fields = read_control()
         self.assertEqual("com.jibeib.xlstream.safe", fields["Package"])
