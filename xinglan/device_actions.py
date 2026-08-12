@@ -451,6 +451,10 @@ class PersistentDeviceActionHub:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if disconnected in done:
+                        try:
+                            await disconnected
+                        except Exception:
+                            pass
                         if queued in done:
                             pending = queued.result()
                         else:
