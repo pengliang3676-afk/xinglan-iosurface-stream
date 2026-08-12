@@ -43,10 +43,7 @@ class TouchTransportTests(unittest.TestCase):
         assert queue is not None
         self.assertEqual(1, queue.qsize())
         self.assertEqual("touch_move_latest", queue.get_nowait().kind)
-        latest = self.session._latest_touch_move
-        self.assertIsNotNone(latest)
-        assert latest is not None
-        _, command = latest
+        command = self.session._latest_touch_moves[0]
         self.assertIsInstance(command, TouchCommand)
         self.assertAlmostEqual(0.99, command.x)
         self.assertAlmostEqual(0.495, command.y)
@@ -72,7 +69,7 @@ class TouchTransportTests(unittest.TestCase):
         )
         self.assertEqual(TouchPhase.DOWN, queued[0].value.phase)
         self.assertEqual(TouchPhase.UP, queued[-1].value.phase)
-        self.assertIsNone(self.session._latest_touch_move)
+        self.assertIn(1, self.session._latest_touch_moves)
 
     def test_delayed_old_marker_cannot_steal_next_drag_coordinate(self) -> None:
         async def submit() -> None:
@@ -89,7 +86,7 @@ class TouchTransportTests(unittest.TestCase):
         queued = [queue.get_nowait() for _ in range(queue.qsize())]
         markers = [item for item in queued if item.kind == "touch_move_latest"]
         self.assertEqual([1, 2], [item.value for item in markers])
-        self.assertEqual(2, self.session._latest_touch_move[0])
+        self.assertEqual({1, 2}, set(self.session._latest_touch_moves))
 
 
 if __name__ == "__main__":

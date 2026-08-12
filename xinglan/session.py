@@ -169,7 +169,7 @@ class DeviceSession:
         # MOVE uses a latest-value mailbox. At most one marker is queued;
         # subsequent coordinates overwrite the pending value instead of
         # creating a FIFO trail that continues after mouse-up.
-        self._latest_touch_move: tuple[int, TouchCommand] | None = None
+        self._latest_touch_moves: dict[int, TouchCommand] = {}
         self._touch_generation = 0
         self._touch_marker_generations: set[int] = set()
         self._touch_stream_supported = False
@@ -192,6 +192,8 @@ class DeviceSession:
     def stop(self) -> None:
         self._stop.set()
         self.latest.clear()
+        self._latest_touch_moves.clear()
+        self._touch_marker_generations.clear()
         with self._lock:
             self._status = "已断开投屏"
             self._error = ""
@@ -256,10 +258,9 @@ class DeviceSession:
                     # marker from the preceding drag can therefore never read
                     # coordinates belonging to the new drag.
                     self._touch_generation += 1
-                    self._latest_touch_move = None
                 elif touch.phase == TouchPhase.MOVE:
                     generation = self._touch_generation
-                    self._latest_touch_move = (generation, touch)
+                    self._latest_touch_moves[generation] = touch
                     if generation in self._touch_marker_generations:
                         return
                     try:
@@ -270,13 +271,6 @@ class DeviceSession:
                     except asyncio.QueueFull:
                         pass
                     return
-                elif touch.phase in (TouchPhase.UP, TouchPhase.CANCEL):
-                    # UP carries the final absolute coordinate. Invalidate any
-                    # queued MOVE mailbox before placing UP behind the marker;
-                    # a marker already in flight still completes before UP.
-                    latest = self._latest_touch_move
-                    if latest is not None and latest[0] == self._touch_generation:
-                        self._latest_touch_move = None
             if queue.full():
                 retained: list[ControlEnvelope] = []
                 removed_move = False
@@ -288,6 +282,7 @@ class DeviceSession:
                     ):
                         if isinstance(queued.value, int):
                             self._touch_marker_generations.discard(queued.value)
+                            self._latest_touch_moves.pop(queued.value, None)
                         removed_move = True
                         continue
                     retained.append(queued)
@@ -573,11 +568,9 @@ class DeviceSession:
         # Clear the marker before awaiting I/O. If another MOVE arrives while
         # writing, it creates one new marker and replaces this mailbox value.
         self._touch_marker_generations.discard(generation)
-        latest = self._latest_touch_move
-        if latest is None or latest[0] != generation:
+        command = self._latest_touch_moves.pop(generation, None)
+        if command is None:
             return
-        _, command = latest
-        self._latest_touch_move = None
         if self._touch_stream_supported:
             await asyncio.wait_for(
                 connection.sendall(
