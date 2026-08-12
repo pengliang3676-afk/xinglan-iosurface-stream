@@ -24,8 +24,6 @@ from xinglan.device_discovery import discover_usb_udids_stable  # noqa: E402
 from xinglan.device_actions import (  # noqa: E402
     identify_physical_device,
     send_legacy_action_to_devices,
-    send_reliable_sleep_to_devices,
-    send_reliable_wake_to_devices,
 )
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
@@ -913,8 +911,6 @@ class XinglanApp:
         self.health_tick = 0
         self._scan_in_progress = False
         self._closing = False
-        self._power_action_generation = 0
-        self._power_action_lock = threading.Lock()
         root.title("星澜")
         try:
             root.iconbitmap(default=str(PROJECT_DIR / "assets" / "xinglan.ico"))
@@ -1230,16 +1226,6 @@ class XinglanApp:
     def _all_online_udids(self) -> list[str]:
         return sorted(self.sessions)
 
-    def _begin_power_action(self) -> int:
-        """Invalidate every older wake/sleep operation and return this click's id."""
-        with self._power_action_lock:
-            self._power_action_generation += 1
-            return self._power_action_generation
-
-    def _power_action_is_current(self, generation: int) -> bool:
-        with self._power_action_lock:
-            return generation == self._power_action_generation
-
     def _run_all_device_action(self, action: str, label: str) -> None:
         udids = self._all_online_udids()
         if not udids:
@@ -1263,58 +1249,10 @@ class XinglanApp:
         )
 
     def wake_all_devices(self) -> None:
-        udids = self._all_online_udids()
-        if not udids:
-            self.summary.set("全部开屏：当前没有USB在线手机")
-            return
-        generation = self._begin_power_action()
-        self.summary.set(f"全部开屏：正在唤醒并确认 {len(udids)} 台手机…")
-
-        def completed(result) -> None:
-            if not self._power_action_is_current(generation):
-                return
-            if isinstance(result, Exception):
-                self.summary.set(f"全部开屏失败：{result}")
-                return
-            succeeded = sum(1 for ok in result.values() if ok)
-            failed = len(result) - succeeded
-            self.summary.set(f"全部开屏：成功 {succeeded} 台，失败 {failed} 台")
-
-        self._run_async_action(
-            lambda: send_reliable_wake_to_devices(
-                udids,
-                should_continue=lambda: self._power_action_is_current(generation),
-            ),
-            completed,
-        )
+        self._run_all_device_action("wake", "全部开屏")
 
     def sleep_all_devices(self) -> None:
-        udids = self._all_online_udids()
-        if not udids:
-            self.summary.set("全部熄屏：当前没有USB在线手机")
-            return
-        # This invalidates any older WAKE/HOME sequence before lock commands
-        # start, so a delayed HOME can never turn a phone back on afterwards.
-        generation = self._begin_power_action()
-        self.summary.set(f"全部熄屏：正在熄屏并确认 {len(udids)} 台手机…")
-
-        def completed(result) -> None:
-            if not self._power_action_is_current(generation):
-                return
-            if isinstance(result, Exception):
-                self.summary.set(f"全部熄屏失败：{result}")
-                return
-            succeeded = sum(1 for ok in result.values() if ok)
-            failed = len(result) - succeeded
-            self.summary.set(f"全部熄屏：成功 {succeeded} 台，失败 {failed} 台")
-
-        self._run_async_action(
-            lambda: send_reliable_sleep_to_devices(
-                udids,
-                should_continue=lambda: self._power_action_is_current(generation),
-            ),
-            completed,
-        )
+        self._run_all_device_action("sleep", "全部熄屏")
 
     def select_all_devices(self) -> None:
         targets = self._current_group_udids()
