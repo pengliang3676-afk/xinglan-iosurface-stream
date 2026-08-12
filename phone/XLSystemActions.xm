@@ -30,6 +30,8 @@
 static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
 static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
 static const char *XLControlCenterOpenNotification = "com.jibeib.xlstream.controlcenter.open";
+static const char *XLHomeStateRequestNotification = "com.jibeib.xlstream.home.state.request";
+static const char *XLHomeStateAckNotification = "com.jibeib.xlstream.home.state.ack";
 static const char *XLTextInsertNotification = "com.jibeib.xlstream.text.insert";
 static const char *XLTextPasteBeginNotification = "com.jibeib.xlstream.text.paste.begin";
 static const char *XLTextPasteChunkNotification = "com.jibeib.xlstream.text.paste.chunk";
@@ -142,6 +144,64 @@ static id XLShared(Class cls) {
     SEL selector = NSSelectorFromString(@"sharedInstance");
     if (!cls || ![cls respondsToSelector:selector]) return nil;
     return ((id (*)(id, SEL))objc_msgSend)((id)cls, selector);
+}
+
+static BOOL XLInvokeBooleanSelector(id target, NSString *selectorName, BOOL *known) {
+    SEL selector = NSSelectorFromString(selectorName);
+    if (!target || ![target respondsToSelector:selector]) return NO;
+    if (known) *known = YES;
+    return ((BOOL (*)(id, SEL))objc_msgSend)(target, selector);
+}
+
+static BOOL XLAnyBooleanSelector(id target, NSArray<NSString *> *selectorNames) {
+    for (NSString *selectorName in selectorNames) {
+        BOOL known = NO;
+        BOOL value = XLInvokeBooleanSelector(target, selectorName, &known);
+        if (known && value) return YES;
+    }
+    return NO;
+}
+
+static BOOL XLIsOrdinaryHomeScreen(void) {
+    UIApplication *springBoard = UIApplication.sharedApplication;
+    SEL frontSelector = NSSelectorFromString(@"_accessibilityFrontMostApplication");
+    if (![springBoard respondsToSelector:frontSelector]) return NO;
+    id frontApplication =
+        ((id (*)(id, SEL))objc_msgSend)(springBoard, frontSelector);
+    if (frontApplication) return NO;
+
+    id lockScreen = XLShared(NSClassFromString(@"SBLockScreenManager"));
+    if (XLAnyBooleanSelector(lockScreen, @[@"isUILocked", @"isLockScreenVisible"])) {
+        return NO;
+    }
+
+    id controlCenter = XLShared(NSClassFromString(@"SBControlCenterController"));
+    if (XLAnyBooleanSelector(controlCenter,
+                             @[@"isPresented", @"isVisible", @"isTransitioning"])) {
+        return NO;
+    }
+
+    id switcher = XLShared(NSClassFromString(@"SBMainSwitcherViewController"));
+    if (XLAnyBooleanSelector(switcher,
+                             @[@"isMainSwitcherVisible", @"isVisible", @"isPresented"])) {
+        return NO;
+    }
+
+    id iconController = XLShared(NSClassFromString(@"SBIconController"));
+    if (XLAnyBooleanSelector(iconController,
+                             @[@"hasOpenFolder", @"isDisplayingFolder", @"isEditing"])) {
+        return NO;
+    }
+    return YES;
+}
+
+static void XLPostHomeStateAck(uint64_t request, BOOL alreadyHome) {
+    if (request == 0) return;
+    int token = 0;
+    if (notify_register_check(XLHomeStateAckNotification, &token) != NOTIFY_STATUS_OK) return;
+    notify_set_state(token, (request << 1) | (alreadyHome ? 1 : 0));
+    notify_post(XLHomeStateAckNotification);
+    notify_cancel(token);
 }
 
 static void XLWakeScreen(void) {
@@ -317,6 +377,7 @@ static void XLRegisterSpringBoardActions(void) {
     int wakeToken = 0;
     int lockToken = 0;
     int controlCenterToken = 0;
+    int homeStateToken = 0;
     notify_register_dispatch(XLScreenWakeNotification, &wakeToken,
                              dispatch_get_main_queue(), ^(int token) {
         (void)token;
@@ -331,6 +392,12 @@ static void XLRegisterSpringBoardActions(void) {
                              dispatch_get_main_queue(), ^(int token) {
         (void)token;
         XLOpenControlCenter();
+    });
+    notify_register_dispatch(XLHomeStateRequestNotification, &homeStateToken,
+                             dispatch_get_main_queue(), ^(int token) {
+        uint64_t request = 0;
+        if (notify_get_state(token, &request) != NOTIFY_STATUS_OK) return;
+        XLPostHomeStateAck(request, XLIsOrdinaryHomeScreen());
     });
 }
 

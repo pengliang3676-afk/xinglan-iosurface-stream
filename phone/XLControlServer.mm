@@ -12,6 +12,7 @@
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <mutex>
 #include <netinet/in.h>
 #include <notify.h>
 #include <sys/socket.h>
@@ -23,6 +24,16 @@ static const uint16_t XLLegacyControlPort = 6000;
 static const char *XLScreenWakeNotification = "com.jibeib.xlstream.screen.wake";
 static const char *XLScreenLockNotification = "com.jibeib.xlstream.screen.lock";
 static const char *XLControlCenterOpenNotification = "com.jibeib.xlstream.controlcenter.open";
+static const char *XLHomeStateRequestNotification = "com.jibeib.xlstream.home.state.request";
+static const char *XLHomeStateAckNotification = "com.jibeib.xlstream.home.state.ack";
+
+static std::mutex XLSystemActionMutex;
+static BOOL XLLastSystemActionValid = NO;
+static uint32_t XLLastSystemActionSequence = 0;
+static uint16_t XLLastSystemActionValue = 0;
+static uint32_t XLLastSystemActionResult = 0;
+static CFAbsoluteTime XLLastSystemActionTime = 0;
+static std::atomic_ullong XLHomeStateRequestCounter(0);
 
 static BOOL XLReadAll(int socketHandle, void *buffer, size_t length) {
     uint8_t *bytes = (uint8_t *)buffer;
@@ -129,12 +140,58 @@ static int XLScreenIsOn(void) {
     return result == NOTIFY_STATUS_OK ? (state != 0 ? 1 : 0) : -1;
 }
 
-static uint32_t XLHandleSystemAction(XLHIDSender *sender, const NSData *data) {
-    if (data.length != sizeof(XLSystemActionPayload)) return 2;
-    XLSystemActionPayload payload = {};
-    [data getBytes:&payload length:sizeof(payload)];
-    switch ((XLSystemAction)ntohs(payload.action)) {
+static int XLIsOrdinaryHomeScreen(void) {
+    int requestToken = 0;
+    int ackToken = 0;
+    if (notify_register_check(XLHomeStateRequestNotification, &requestToken) !=
+            NOTIFY_STATUS_OK ||
+        notify_register_check(XLHomeStateAckNotification, &ackToken) !=
+            NOTIFY_STATUS_OK) {
+        if (requestToken != 0) notify_cancel(requestToken);
+        if (ackToken != 0) notify_cancel(ackToken);
+        return -1;
+    }
+
+    uint64_t request = XLHomeStateRequestCounter.fetch_add(1) + 1;
+    request &= 0x7FFFFFFFFFFFFFFFULL;
+    if (request == 0) request = 1;
+    // Clear any reply left by a previous daemon process before publishing a
+    // new request; otherwise a recycled request number could read a stale
+    // SpringBoard answer before the fresh callback runs.
+    notify_set_state(ackToken, 0);
+    if (notify_set_state(requestToken, request) != NOTIFY_STATUS_OK ||
+        notify_post(XLHomeStateRequestNotification) != NOTIFY_STATUS_OK) {
+        notify_cancel(requestToken);
+        notify_cancel(ackToken);
+        return -1;
+    }
+
+    int result = -1;
+    for (int attempt = 0; attempt < 40; attempt++) {
+        uint64_t state = 0;
+        if (notify_get_state(ackToken, &state) == NOTIFY_STATUS_OK &&
+            (state >> 1) == request) {
+            result = (state & 1) != 0 ? 1 : 0;
+            break;
+        }
+        usleep(5000);
+    }
+    notify_cancel(requestToken);
+    notify_cancel(ackToken);
+    return result;
+}
+
+static uint32_t XLExecuteSystemAction(
+    XLHIDSender *sender, XLSystemAction action) {
+    switch (action) {
         case XLSystemActionHome:
+            // A Home press on an already visible home screen changes pages or
+            // can combine with a retry into an unintended double press.
+            // SpringBoard is the only process that can reliably tell us that
+            // the ordinary home screen is already visible.  If the query is
+            // unavailable (for example while SpringBoard is restarting), keep
+            // the proven HID fallback.
+            if (XLIsOrdinaryHomeScreen() == 1) return 0;
             return [sender sendHomeButton] ? 0 : 4;
         case XLSystemActionWake: {
             int state = XLScreenIsOn();
@@ -162,6 +219,35 @@ static uint32_t XLHandleSystemAction(XLHIDSender *sender, const NSData *data) {
             return notify_post(XLControlCenterOpenNotification) == NOTIFY_STATUS_OK ? 0 : 4;
     }
     return 3;
+}
+
+static uint32_t XLHandleSystemAction(
+    XLHIDSender *sender, const NSData *data, uint32_t sequence) {
+    if (data.length != sizeof(XLSystemActionPayload)) return 2;
+    XLSystemActionPayload payload = {};
+    [data getBytes:&payload length:sizeof(payload)];
+    uint16_t rawAction = ntohs(payload.action);
+
+    // Keep the cache across control-socket reconnects.  The desktop retains a
+    // command until it receives its ACK, so without this guard the phone could
+    // execute the command, lose the ACK, reconnect and execute it a second
+    // time.  Serialising this short path also closes the two-client race.
+    std::lock_guard<std::mutex> guard(XLSystemActionMutex);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (XLLastSystemActionValid &&
+        XLLastSystemActionSequence == sequence &&
+        XLLastSystemActionValue == rawAction &&
+        now - XLLastSystemActionTime <= 8.0) {
+        return XLLastSystemActionResult;
+    }
+
+    uint32_t result = XLExecuteSystemAction(sender, (XLSystemAction)rawAction);
+    XLLastSystemActionValid = YES;
+    XLLastSystemActionSequence = sequence;
+    XLLastSystemActionValue = rawAction;
+    XLLastSystemActionResult = result;
+    XLLastSystemActionTime = CFAbsoluteTimeGetCurrent();
+    return result;
 }
 
 static void XLHandleControlClient(int client) {
@@ -199,7 +285,7 @@ static void XLHandleControlClient(int client) {
                     break;
                 }
                 case XLMessageSystemAction: {
-                    uint32_t result = XLHandleSystemAction(sender, payload);
+                    uint32_t result = XLHandleSystemAction(sender, payload, sequence);
                     if (result != 0) XLControlErrors.fetch_add(1);
                     if (!XLWriteAck(client, sequence, result)) return;
                     break;

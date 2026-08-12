@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -163,7 +164,11 @@ class DeviceSession:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._control_queue: asyncio.Queue[ControlEnvelope] | None = None
         self._decoder_reset = threading.Event()
-        self._sequence = 0
+        # The phone remembers recently executed system-action sequences so an
+        # ACK loss followed by a USB reconnect cannot press Home twice.  Seed
+        # each desktop session independently to avoid a freshly reopened app
+        # colliding with the preceding session's short deduplication window.
+        self._sequence = secrets.randbits(32)
         self._thread = threading.Thread(
             target=self._thread_main,
             name=f"device-{udid[-8:]}",
