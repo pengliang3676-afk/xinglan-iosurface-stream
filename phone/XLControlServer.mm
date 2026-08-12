@@ -16,6 +16,7 @@
 #include <netinet/in.h>
 #include <notify.h>
 #include <sys/socket.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 
 static std::atomic_uint XLControlErrors(0);
@@ -88,7 +89,8 @@ static BOOL XLWriteHelloAck(int client, uint32_t sequence) {
                                  XLCapabilityStatus |
                                  XLCapabilityKeyframeRequest |
                                  XLCapabilityFileTransfer |
-                                 XLCapabilityTextInput);
+                                 XLCapabilityTextInput |
+                                 XLCapabilityTouchStream);
     payload.screenWidth = htons(XLVideoWidth);
     payload.screenHeight = htons(XLVideoHeight);
     payload.protocolVersion = htons(XLProtocolVersion);
@@ -284,6 +286,14 @@ static void XLHandleControlClient(int client) {
                     if (!XLWriteAck(client, sequence, result)) return;
                     break;
                 }
+                case XLMessageTouchStream: {
+                    // MOVE is an absolute latest position, not a transaction.
+                    // No ACK means USB latency cannot replay old cursor points
+                    // after the user has already released the mouse button.
+                    uint32_t result = XLHandleTouch(sender, payload);
+                    if (result != 0) XLControlErrors.fetch_add(1);
+                    break;
+                }
                 case XLMessageSystemAction: {
                     uint32_t result = XLHandleSystemAction(sender, payload, sequence);
                     if (result != 0) XLControlErrors.fetch_add(1);
@@ -339,6 +349,8 @@ static void XLRunControlServer(void) {
     while (true) {
         int client = accept(server, NULL, NULL);
         if (client < 0) continue;
+        int noDelay = 1;
+        setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
             XLHandleControlClient(client);
         });

@@ -27,6 +27,7 @@ from xinglan.control_protocol import (
     pack_system_action,
     pack_text_input,
     pack_touch,
+    pack_touch_stream,
     unpack_ack,
     unpack_header,
     unpack_hello,
@@ -55,6 +56,18 @@ class ControlProtocolTests(unittest.TestCase):
         self.assertEqual(12, header.payload_length)
         self.assertEqual((0.0, 1.0), (touch.x, touch.y))
         self.assertAlmostEqual(0.4, touch.pressure, places=4)
+
+    def test_touch_stream_is_move_only(self) -> None:
+        command = TouchCommand(TouchPhase.MOVE, 0, 0.25, 0.75, 1.0, 9876)
+        packet = pack_touch_stream(command, sequence=10)
+        header = unpack_header(packet[:HEADER.size], CONTROL_MAGIC)
+        self.assertEqual(MessageType.TOUCH_STREAM, header.message_type)
+        self.assertEqual(command.phase, unpack_touch(packet[HEADER.size:]).phase)
+        with self.assertRaises(ValueError):
+            pack_touch_stream(
+                TouchCommand(TouchPhase.UP, 0, 0.25, 0.75, 0.0, 9877),
+                sequence=11,
+            )
 
     def test_rejects_wrong_magic(self) -> None:
         encoded = pack_header(CONTROL_MAGIC, MessageType.PING, 0, 1)

@@ -19,6 +19,8 @@ enum XLMessageType : uint8_t {
     XLMessageRequestKeyframe = 12,
     XLMessageTextInput = 13,
     XLMessageKeyEvent = 14,
+    // Latest-coordinate MOVE packet; deliberately has no ACK.
+    XLMessageTouchStream = 15,
     XLMessagePing = 20,
     XLMessagePong = 21,
     XLMessageAck = 22,
@@ -51,6 +53,7 @@ enum XLCapability : uint32_t {
     XLCapabilityKeyframeRequest = 1u << 4,
     XLCapabilityFileTransfer = 1u << 5,
     XLCapabilityTextInput = 1u << 6,
+    XLCapabilityTouchStream = 1u << 7,
 };
 
 enum XLDeviceStatusFlag : uint16_t {

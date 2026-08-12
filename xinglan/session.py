@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ configure_dependencies()
 from PIL import Image  # noqa: E402
 
 from .control_protocol import (  # noqa: E402
+    CAPABILITY_TOUCH_STREAM,
     CONTROL_MAGIC,
     CONTROL_PORT,
     HEADER,
@@ -34,6 +36,7 @@ from .control_protocol import (  # noqa: E402
     pack_system_action,
     pack_text_input,
     pack_touch,
+    pack_touch_stream,
     unpack_ack,
     unpack_device_status,
     unpack_header,
@@ -163,6 +166,13 @@ class DeviceSession:
         self._stop = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._control_queue: asyncio.Queue[ControlEnvelope] | None = None
+        # MOVE uses a latest-value mailbox. At most one marker is queued;
+        # subsequent coordinates overwrite the pending value instead of
+        # creating a FIFO trail that continues after mouse-up.
+        self._latest_touch_move: tuple[int, TouchCommand] | None = None
+        self._touch_generation = 0
+        self._touch_marker_generations: set[int] = set()
+        self._touch_stream_supported = False
         self._decoder_reset = threading.Event()
         # The phone remembers recently executed system-action sequences so an
         # ACK loss followed by a USB reconnect cannot press Home twice.  Seed
@@ -239,6 +249,34 @@ class DeviceSession:
             return False
 
         def enqueue_latest() -> None:
+            touch = envelope.value if envelope.kind == "touch" else None
+            if isinstance(touch, TouchCommand):
+                if touch.phase == TouchPhase.DOWN:
+                    # Every drag owns an independent generation. A delayed
+                    # marker from the preceding drag can therefore never read
+                    # coordinates belonging to the new drag.
+                    self._touch_generation += 1
+                    self._latest_touch_move = None
+                elif touch.phase == TouchPhase.MOVE:
+                    generation = self._touch_generation
+                    self._latest_touch_move = (generation, touch)
+                    if generation in self._touch_marker_generations:
+                        return
+                    try:
+                        queue.put_nowait(
+                            ControlEnvelope("touch_move_latest", generation)
+                        )
+                        self._touch_marker_generations.add(generation)
+                    except asyncio.QueueFull:
+                        pass
+                    return
+                elif touch.phase in (TouchPhase.UP, TouchPhase.CANCEL):
+                    # UP carries the final absolute coordinate. Invalidate any
+                    # queued MOVE mailbox before placing UP behind the marker;
+                    # a marker already in flight still completes before UP.
+                    latest = self._latest_touch_move
+                    if latest is not None and latest[0] == self._touch_generation:
+                        self._latest_touch_move = None
             if queue.full():
                 retained: list[ControlEnvelope] = []
                 removed_move = False
@@ -246,10 +284,10 @@ class DeviceSession:
                     queued = queue.get_nowait()
                     if (
                         not removed_move
-                        and queued.kind == "touch"
-                        and isinstance(queued.value, TouchCommand)
-                        and queued.value.phase == TouchPhase.MOVE
+                        and queued.kind == "touch_move_latest"
                     ):
+                        if isinstance(queued.value, int):
+                            self._touch_marker_generations.discard(queued.value)
                         removed_move = True
                         continue
                     retained.append(queued)
@@ -373,7 +411,7 @@ class DeviceSession:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _open_channel(self, port: int, timeout: float = 4.0) -> Any:
-        return await asyncio.wait_for(
+        connection = await asyncio.wait_for(
             ServiceConnection.create_using_usbmux(
                 self.udid,
                 port,
@@ -381,6 +419,15 @@ class DeviceSession:
             ),
             timeout=timeout,
         )
+        # Tiny touch packets must leave immediately. Nagle coalescing is useful
+        # for bulk data but makes pointer movement feel as if it keeps sliding.
+        channel_socket = getattr(connection, "socket", None)
+        if channel_socket is not None:
+            try:
+                channel_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except (AttributeError, OSError):
+                pass
+        return connection
 
     @staticmethod
     async def _close_channel(connection: Any | None) -> None:
@@ -489,7 +536,10 @@ class DeviceSession:
         header, payload = await read_channel_message(connection, CONTROL_MAGIC, 2.0)
         if header.message_type != MessageType.HELLO_ACK or header.sequence != sequence:
             raise ValueError("控制通道握手响应不匹配")
-        unpack_hello(payload)
+        hello = unpack_hello(payload)
+        self._touch_stream_supported = bool(
+            hello.capabilities & CAPABILITY_TOUCH_STREAM
+        )
 
     async def _send_control_envelope(self, connection: Any, envelope: ControlEnvelope) -> None:
         sequence = self._next_sequence()
@@ -514,6 +564,34 @@ class DeviceSession:
             raise ValueError("控制 ACK 序列号不匹配")
         if acknowledgement.result_code != 0:
             raise RuntimeError(f"手机拒绝控制命令，代码 {acknowledgement.result_code}")
+
+    async def _send_latest_touch_move(
+        self,
+        connection: Any,
+        generation: int,
+    ) -> None:
+        # Clear the marker before awaiting I/O. If another MOVE arrives while
+        # writing, it creates one new marker and replaces this mailbox value.
+        self._touch_marker_generations.discard(generation)
+        latest = self._latest_touch_move
+        if latest is None or latest[0] != generation:
+            return
+        _, command = latest
+        self._latest_touch_move = None
+        if self._touch_stream_supported:
+            await asyncio.wait_for(
+                connection.sendall(
+                    pack_touch_stream(command, self._next_sequence())
+                ),
+                timeout=1.0,
+            )
+            return
+        # Phones on the preceding package keep the old ACK protocol, but MOVE
+        # is still coalesced to the newest position on the desktop.
+        await self._send_control_envelope(
+            connection,
+            ControlEnvelope("touch", command),
+        )
 
     async def _send_control_ping(self, connection: Any) -> None:
         sequence = self._next_sequence()
@@ -549,7 +627,12 @@ class DeviceSession:
                         except asyncio.TimeoutError:
                             await self._send_control_ping(connection)
                             continue
-                    await self._send_control_envelope(connection, pending)
+                    if pending.kind == "touch_move_latest":
+                        if not isinstance(pending.value, int):
+                            raise ValueError("touch move marker missing generation")
+                        await self._send_latest_touch_move(connection, pending.value)
+                    else:
+                        await self._send_control_envelope(connection, pending)
                     pending = None
             except asyncio.CancelledError:
                 raise
@@ -560,6 +643,7 @@ class DeviceSession:
                 delay = min(3.0, delay * 1.5)
             finally:
                 self._set_control_online(False)
+                self._touch_stream_supported = False
                 await self._close_channel(connection)
 
     async def _status_supervisor(self) -> None:

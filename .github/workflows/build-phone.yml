@@ -13,14 +13,6 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: RootHide
-            scheme: roothide
-          - name: Dopamine-Rootless
-            scheme: rootless
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,17 +27,12 @@ jobs:
           brew install ldid xz
           git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
 
-      - name: Build ${{ matrix.name }} package
+      - name: Build RootHide package
         env:
           THEOS: ${{ runner.temp }}/theos-link
         run: |
           ln -s "$HOME/theos" "$THEOS"
-          if [ "${{ matrix.scheme }}" = "rootless" ]; then
-            /usr/libexec/PlistBuddy -c \
-              "Set :ProgramArguments:0 /var/jb/Applications/XLStream.app/bin/xlstreamd" \
-              phone/layout/Library/LaunchDaemons/com.jibeib.xlstreamd.plist
-          fi
-          make -C phone clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
+          make -C phone clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 
       - name: Collect package
         run: |
@@ -53,12 +40,12 @@ jobs:
           version="$(awk '/^Version:/{print $2}' phone/control)"
           package="$(find phone/packages -name '*.deb' -print -quit)"
           test -n "$package"
-          cp "$package" "output/XLStream-${version}-${{ matrix.name }}.deb"
+          cp "$package" "output/XLStream-${version}-RootHide.deb"
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: XLStream-${{ matrix.name }}
+          name: XLStream-RootHide
           path: output/*.deb
           if-no-files-found: error
 
@@ -70,12 +57,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: XLStream-RootHide
-          path: packages
-
-      - name: Download Dopamine package
-        uses: actions/download-artifact@v4
-        with:
-          name: XLStream-Dopamine-Rootless
           path: packages
 
       - name: Verify built package metadata and scripts
@@ -98,7 +79,7 @@ jobs:
             grep -q 'XLStream.app/bin/xlstreamd' "$verify_dir/files.txt"
             grep -q 'XLSystemActions.dylib' "$verify_dir/files.txt"
           done
-          test "$count" -eq 2
+          test "$count" -eq 1
 
       - name: Verify Replaces migration bypasses legacy prerm
         shell: bash
