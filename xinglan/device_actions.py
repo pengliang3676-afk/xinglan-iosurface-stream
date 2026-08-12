@@ -86,10 +86,19 @@ async def _read_message(
     return header, payload
 
 
-async def send_device_action(udid: str, action: str, timeout: float = 3.0) -> bool:
-    system_action = ACTION_MAP.get(action)
-    if system_action is None:
-        raise ValueError(f"不支持的手机动作：{action}")
+async def send_device_action_sequence(
+    udid: str,
+    actions: Iterable[str],
+    timeout: float = 3.0,
+) -> bool:
+    system_actions: list[SystemAction] = []
+    for action in actions:
+        system_action = ACTION_MAP.get(action)
+        if system_action is None:
+            raise ValueError(f"不支持的手机动作：{action}")
+        system_actions.append(system_action)
+    if not system_actions:
+        return True
 
     connection: Any | None = None
     try:
@@ -115,19 +124,23 @@ async def send_device_action(udid: str, action: str, timeout: float = 3.0) -> bo
             return False
         unpack_hello(hello_payload)
 
-        action_sequence = 2
-        await asyncio.wait_for(
-            connection.sendall(pack_system_action(system_action, action_sequence)),
-            timeout=1.0,
-        )
-        action_header, action_payload = await _read_message(connection, timeout)
-        if action_header.message_type != MessageType.ACK:
-            return False
-        acknowledgement = unpack_ack(action_payload)
-        return (
-            acknowledgement.acknowledged_sequence == action_sequence
-            and acknowledgement.result_code == 0
-        )
+        for action_sequence, system_action in enumerate(system_actions, start=2):
+            await asyncio.wait_for(
+                connection.sendall(
+                    pack_system_action(system_action, action_sequence)
+                ),
+                timeout=1.0,
+            )
+            action_header, action_payload = await _read_message(connection, timeout)
+            if action_header.message_type != MessageType.ACK:
+                return False
+            acknowledgement = unpack_ack(action_payload)
+            if (
+                acknowledgement.acknowledged_sequence != action_sequence
+                or acknowledgement.result_code != 0
+            ):
+                return False
+        return True
     except Exception:
         return False
     finally:
@@ -136,6 +149,10 @@ async def send_device_action(udid: str, action: str, timeout: float = 3.0) -> bo
                 await connection.close()
             except Exception:
                 pass
+
+
+async def send_device_action(udid: str, action: str, timeout: float = 3.0) -> bool:
+    return await send_device_action_sequence(udid, [action], timeout=timeout)
 
 
 async def send_action_to_devices(
@@ -152,6 +169,28 @@ async def send_action_to_devices(
     async def send_one(udid: str) -> bool:
         async with semaphore:
             return await send_device_action(udid, action)
+
+    results = await asyncio.gather(
+        *(send_one(udid) for udid in ordered),
+        return_exceptions=True,
+    )
+    return {
+        udid: bool(result) if not isinstance(result, BaseException) else False
+        for udid, result in zip(ordered, results)
+    }
+
+
+async def send_action_sequence_to_devices(
+    udids: Iterable[str],
+    actions: Iterable[str],
+) -> dict[str, bool]:
+    ordered = list(dict.fromkeys(udids))
+    sequence = list(actions)
+    semaphore = asyncio.Semaphore(64)
+
+    async def send_one(udid: str) -> bool:
+        async with semaphore:
+            return await send_device_action_sequence(udid, sequence)
 
     results = await asyncio.gather(
         *(send_one(udid) for udid in ordered),
@@ -213,26 +252,31 @@ async def send_legacy_action_to_devices(
 
 async def send_reliable_wake_to_devices(
     udids: Iterable[str],
-    *,
-    verification_delay: float = 0.35,
 ) -> dict[str, bool]:
-    """Wake instantly through the old channel, then verify through XLStream.
+    """Wake instantly, verify the display, then return every phone home.
 
     The legacy ``14`` command is fire-and-forget: a successful USB write does
     not prove that the display actually woke.  The binary XLStream action waits
     for the phone-side handler to check the display and apply its power/home
-    fallback.  Repeating wake this way is safe for an already-awake phone.
+    fallback.  The explicit HOME action is still required because a successful
+    wake notification returns as soon as the display is on.
 
     Plug-ins without the binary control channel retain the legacy result, so
     the top button stays backwards compatible.
     """
     ordered = list(dict.fromkeys(udids))
-    legacy_result = await send_legacy_action_to_devices(ordered, "wake")
-    if verification_delay > 0:
-        await asyncio.sleep(verification_delay)
-    verified_result = await send_action_to_devices(ordered, "wake")
+    # Start both wake paths in the same event-loop turn.  Do not wait before
+    # the verified path: that delay was visible on phones missed by port 6000.
+    legacy_task = asyncio.create_task(
+        send_legacy_action_to_devices(ordered, "wake")
+    )
+    completed_result = await send_action_sequence_to_devices(
+        ordered,
+        ["wake", "home"],
+    )
+    legacy_result = await legacy_task
     return {
-        udid: bool(verified_result.get(udid) or legacy_result.get(udid))
+        udid: bool(completed_result.get(udid) or legacy_result.get(udid))
         for udid in ordered
     }
 

@@ -21,7 +21,9 @@ from xinglan.device_actions import (
     LEGACY_CONTROL_PORT,
     identify_physical_device,
     send_action_to_devices,
+    send_action_sequence_to_devices,
     send_device_action,
+    send_device_action_sequence,
     send_legacy_action_to_devices,
     send_legacy_device_action,
     send_reliable_wake_to_devices,
@@ -82,6 +84,41 @@ class DeviceActionTests(unittest.TestCase):
         self.assertEqual(MessageType.SYSTEM_ACTION, action_header.message_type)
         self.assertTrue(connection.closed)
 
+    def test_action_sequence_reuses_one_connection_for_wake_and_home(self) -> None:
+        hello = HELLO.pack(0x3F, 360, 640, PROTOCOL_VERSION, 0)
+        response = b"".join(
+            [
+                pack_message(CONTROL_MAGIC, MessageType.HELLO_ACK, 1, hello),
+                pack_message(CONTROL_MAGIC, MessageType.ACK, 2, ACK.pack(2, 0)),
+                pack_message(CONTROL_MAGIC, MessageType.ACK, 3, ACK.pack(3, 0)),
+            ]
+        )
+        connection = FakeConnection(response)
+        create = AsyncMock(return_value=connection)
+        with patch(
+            "xinglan.device_actions.ServiceConnection.create_using_usbmux",
+            new=create,
+        ):
+            result = asyncio.run(
+                send_device_action_sequence("device-01", ["wake", "home"])
+            )
+
+        self.assertTrue(result)
+        create.assert_awaited_once()
+        self.assertEqual(3, len(connection.payloads))
+        self.assertEqual(
+            [
+                MessageType.HELLO,
+                MessageType.SYSTEM_ACTION,
+                MessageType.SYSTEM_ACTION,
+            ],
+            [
+                unpack_header(payload[: HEADER.size], CONTROL_MAGIC).message_type
+                for payload in connection.payloads
+            ],
+        )
+        self.assertTrue(connection.closed)
+
     def test_rejected_action_returns_false(self) -> None:
         hello = HELLO.pack(0x3F, 360, 640, PROTOCOL_VERSION, 0)
         response = b"".join(
@@ -138,14 +175,12 @@ class DeviceActionTests(unittest.TestCase):
         self.assertEqual(result, {"a": True, "b": True, "c": True})
         self.assertEqual(sender.await_count, 3)
 
-    def test_reliable_wake_uses_legacy_broadcast_then_verified_fallback(self) -> None:
+    def test_reliable_wake_verifies_then_returns_every_phone_home(self) -> None:
         legacy = AsyncMock(return_value={"a": True, "b": True, "c": False})
-        verified = AsyncMock(return_value={"a": True, "b": True, "c": True})
-        sleeper = AsyncMock()
+        completed = AsyncMock(return_value={"a": True, "b": True, "c": True})
         with (
             patch("xinglan.device_actions.send_legacy_action_to_devices", new=legacy),
-            patch("xinglan.device_actions.send_action_to_devices", new=verified),
-            patch("xinglan.device_actions.asyncio.sleep", new=sleeper),
+            patch("xinglan.device_actions.send_action_sequence_to_devices", new=completed),
         ):
             result = asyncio.run(
                 send_reliable_wake_to_devices(["a", "b", "a", "c"])
@@ -153,21 +188,19 @@ class DeviceActionTests(unittest.TestCase):
 
         self.assertEqual(result, {"a": True, "b": True, "c": True})
         legacy.assert_awaited_once_with(["a", "b", "c"], "wake")
-        verified.assert_awaited_once_with(["a", "b", "c"], "wake")
-        sleeper.assert_awaited_once_with(0.35)
+        completed.assert_awaited_once_with(
+            ["a", "b", "c"],
+            ["wake", "home"],
+        )
 
     def test_reliable_wake_keeps_legacy_compatibility(self) -> None:
         legacy = AsyncMock(return_value={"old": True, "new": True})
-        verified = AsyncMock(return_value={"old": False, "new": True})
+        completed = AsyncMock(return_value={"old": False, "new": True})
         with (
             patch("xinglan.device_actions.send_legacy_action_to_devices", new=legacy),
-            patch("xinglan.device_actions.send_action_to_devices", new=verified),
+            patch("xinglan.device_actions.send_action_sequence_to_devices", new=completed),
         ):
-            result = asyncio.run(
-                send_reliable_wake_to_devices(
-                    ["old", "new"], verification_delay=0,
-                )
-            )
+            result = asyncio.run(send_reliable_wake_to_devices(["old", "new"]))
 
         self.assertEqual(result, {"old": True, "new": True})
 
