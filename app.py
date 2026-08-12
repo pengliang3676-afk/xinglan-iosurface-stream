@@ -22,8 +22,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk  # noqa: E402
 
 from xinglan.device_discovery import discover_usb_udids_stable  # noqa: E402
 from xinglan.device_actions import (  # noqa: E402
+    PersistentDeviceActionHub,
     identify_physical_device,
-    send_legacy_action_to_devices,
 )
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
@@ -898,6 +898,9 @@ class XinglanApp:
             else None
         )
         self.sessions: dict[str, DeviceSession] = {}
+        # 提前为每台在线手机保持一条轻量级 USB 控制通道。顶部开屏/熄屏
+        # 点击时只广播旧版原始指令，不再临时并发建立 60 条连接。
+        self.action_hub = PersistentDeviceActionHub()
         self.active_udids: set[str] = set()
         self.selected_udids: set[str] = set()
         self.tiles: dict[str, DeviceTile] = {}
@@ -1241,12 +1244,21 @@ class XinglanApp:
             failed = len(result) - succeeded
             self.summary.set(f"{label}：成功 {succeeded} 台，失败 {failed} 台")
 
-        # 与旧浏览器版完全相同：并发连接手机 6000 端口，开屏发送
-        # ``14\r\n``，熄屏发送 ``15\r\n``，发送后立即关闭连接。
-        self._run_async_action(
-            lambda: send_legacy_action_to_devices(udids, action),
-            completed,
-        )
+        # 仍然只发送一次旧版原始 ``14\r\n`` / ``15\r\n``；区别只是
+        # USB 通道已在扫描设备时准备好，按钮点击不再承担建连工作。
+        future = self.action_hub.broadcast(udids, action)
+
+        def finished(done_future) -> None:
+            try:
+                result = done_future.result()
+            except Exception as exc:  # pragma: no cover - defensive UI boundary
+                result = exc
+            try:
+                self.root.after(0, lambda value=result: completed(value))
+            except tk.TclError:
+                pass
+
+        future.add_done_callback(finished)
 
     def wake_all_devices(self) -> None:
         self._run_all_device_action("wake", "全部开屏")
@@ -1996,6 +2008,7 @@ class XinglanApp:
             changed = True
 
         stable_udids = sorted(self.sessions)
+        self.action_hub.update_devices(stable_udids)
 
         if changed:
             self._refresh_group_selector()
@@ -2284,6 +2297,7 @@ class XinglanApp:
 
     def close(self) -> None:
         self._closing = True
+        self.action_hub.close()
         self.ime_worker.close()
         if (
             self.stability_monitor is not None

@@ -359,13 +359,13 @@ async def send_reliable_sleep_to_devices(
 
 
 class PersistentDeviceActionHub:
-    """Keep one tiny control channel per USB phone for instant broadcasts.
+    """Keep one legacy port-6000 USB channel ready for every phone.
 
-    The legacy StarLan UI already had a live tunnel for every phone.  Opening
-    sixty usbmux channels only after a button click makes the new UI appear to
-    switch phones in batches.  This hub restores the legacy behavior without
-    starting video: connections are prepared during discovery and a wake/lock
-    packet is queued to every ready channel in one event-loop turn.
+    The top power buttons must not create sixty usbmux connections at click
+    time.  Connections are established in the background after discovery and
+    the exact legacy ``14``/``15`` packet is broadcast over the ready channels
+    in one event-loop turn.  There is deliberately no second command and no
+    post-action verification.
     """
 
     def __init__(self) -> None:
@@ -412,80 +412,62 @@ class PersistentDeviceActionHub:
             task = self._tasks.pop(udid)
             task.cancel()
             self._channels.pop(udid, None)
-        for udid in desired - set(self._tasks):
+        for position, udid in enumerate(sorted(desired - set(self._tasks))):
             channel = _PersistentChannel(asyncio.Queue(maxsize=8), asyncio.Event())
             self._channels[udid] = channel
             self._tasks[udid] = asyncio.create_task(
-                self._supervise_channel(udid, channel)
+                self._supervise_channel(udid, channel, position * 0.025)
             )
-
-    @staticmethod
-    def _next_sequence(sequence: int) -> int:
-        sequence = (sequence + 1) & 0xFFFFFFFF
-        return sequence or 1
 
     async def _supervise_channel(
         self,
         udid: str,
         channel: _PersistentChannel,
+        initial_delay: float,
     ) -> None:
-        delay = 0.2
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+        delay = 0.15
         pending: _QueuedAction | None = None
         while udid in self._desired:
             connection: Any | None = None
-            sequence = 0
+            disconnected: asyncio.Task[bytes] | None = None
             try:
                 connection = await asyncio.wait_for(
                     ServiceConnection.create_using_usbmux(
                         udid,
-                        CONTROL_PORT,
+                        LEGACY_CONTROL_PORT,
                         connection_type="USB",
                     ),
                     timeout=3.0,
                 )
-                sequence = self._next_sequence(sequence)
-                await connection.sendall(pack_hello(CONTROL_MAGIC, sequence))
-                header, payload = await _read_message(connection, 2.0)
-                if header.message_type != MessageType.HELLO_ACK:
-                    raise ValueError("control hello rejected")
-                unpack_hello(payload)
                 channel.ready.set()
-                delay = 0.2
+                delay = 0.15
+                disconnected = asyncio.create_task(connection.recv_any(1))
                 while udid in self._desired:
-                    if pending is None:
-                        try:
-                            pending = await asyncio.wait_for(channel.queue.get(), 2.0)
-                        except asyncio.TimeoutError:
-                            sequence = self._next_sequence(sequence)
-                            await connection.sendall(
-                                pack_ping(CONTROL_MAGIC, sequence, int(time.monotonic() * 1000))
-                            )
-                            pong, _ = await _read_message(connection, 1.5)
-                            if pong.message_type != MessageType.PONG:
-                                raise ValueError("control heartbeat rejected")
-                            continue
+                    queued = asyncio.create_task(channel.queue.get())
+                    done, _ = await asyncio.wait(
+                        (queued, disconnected),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if disconnected in done:
+                        if queued in done:
+                            pending = queued.result()
+                        else:
+                            queued.cancel()
+                            await asyncio.gather(queued, return_exceptions=True)
+                        raise ConnectionError("legacy control channel closed")
 
-                    system_action = ACTION_MAP.get(pending.action)
-                    if system_action is None:
+                    pending = queued.result()
+                    payload = LEGACY_COMMAND_BYTES.get(pending.action)
+                    if payload is None:
                         if not pending.result.done():
                             pending.result.set_result(False)
                         pending = None
                         continue
-                    sequence = self._next_sequence(sequence)
-                    # All channel workers become runnable together.  The
-                    # phone acts as soon as this packet arrives; ACK waiting
-                    # happens only after dispatch and does not stagger screens.
-                    await connection.sendall(pack_system_action(system_action, sequence))
-                    ack_header, ack_payload = await _read_message(connection, 2.0)
-                    accepted = False
-                    if ack_header.message_type == MessageType.ACK:
-                        acknowledgement = unpack_ack(ack_payload)
-                        accepted = (
-                            acknowledgement.acknowledged_sequence == sequence
-                            and acknowledgement.result_code == 0
-                        )
+                    await connection.sendall(payload)
                     if not pending.result.done():
-                        pending.result.set_result(accepted)
+                        pending.result.set_result(True)
                     pending = None
             except asyncio.CancelledError:
                 raise
@@ -498,6 +480,9 @@ class PersistentDeviceActionHub:
                 delay = min(2.0, delay * 1.6)
             finally:
                 channel.ready.clear()
+                if disconnected is not None and not disconnected.done():
+                    disconnected.cancel()
+                    await asyncio.gather(disconnected, return_exceptions=True)
                 if connection is not None:
                     try:
                         await connection.close()
@@ -520,11 +505,11 @@ class PersistentDeviceActionHub:
         async def send_one(udid: str) -> bool:
             channel = self._channels.get(udid)
             if channel is None:
-                return await send_device_action(udid, action)
+                return False
             try:
-                await asyncio.wait_for(channel.ready.wait(), timeout=0.8)
+                await asyncio.wait_for(channel.ready.wait(), timeout=1.0)
             except asyncio.TimeoutError:
-                return await send_device_action(udid, action)
+                return False
             result = asyncio.get_running_loop().create_future()
             try:
                 channel.queue.put_nowait(_QueuedAction(action, result))

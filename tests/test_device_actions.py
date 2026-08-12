@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +20,7 @@ from xinglan.device_actions import (
     ACTION_MAP,
     LEGACY_COMMAND_BYTES,
     LEGACY_CONTROL_PORT,
+    PersistentDeviceActionHub,
     identify_physical_device,
     send_action_to_devices,
     send_action_sequence_to_devices,
@@ -56,6 +58,14 @@ class FakeConnection:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class PersistentFakeConnection(FakeConnection):
+    """A legacy socket that stays open until its supervisor is cancelled."""
+
+    async def recv_any(self, length: int) -> bytes:
+        await asyncio.Future()
+        return b""  # pragma: no cover - the future is cancelled during shutdown
 
 
 class DeviceActionTests(unittest.TestCase):
@@ -209,6 +219,33 @@ class DeviceActionTests(unittest.TestCase):
 
         self.assertEqual(result, {"a": True, "b": True, "c": True})
         self.assertEqual(sender.await_count, 3)
+
+    def test_persistent_hub_reuses_one_legacy_usb_connection(self) -> None:
+        connection = PersistentFakeConnection()
+        create = AsyncMock(return_value=connection)
+        with patch(
+            "xinglan.device_actions.ServiceConnection.create_using_usbmux",
+            new=create,
+        ):
+            hub = PersistentDeviceActionHub()
+            try:
+                hub.update_devices(["device-01"])
+                deadline = time.monotonic() + 2.0
+                while create.await_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                wake = hub.broadcast(["device-01"], "wake").result(timeout=3.0)
+                sleep = hub.broadcast(["device-01"], "sleep").result(timeout=3.0)
+            finally:
+                hub.close()
+
+        self.assertEqual({"device-01": True}, wake)
+        self.assertEqual({"device-01": True}, sleep)
+        create.assert_awaited_once_with(
+            "device-01", 6000, connection_type="USB"
+        )
+        self.assertEqual([b"14\r\n", b"15\r\n"], connection.payloads)
+        self.assertTrue(connection.closed)
 
     def test_reliable_wake_verifies_then_returns_every_phone_home(self) -> None:
         legacy = AsyncMock(return_value={"a": True, "b": True, "c": False})
