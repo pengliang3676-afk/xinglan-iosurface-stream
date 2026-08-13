@@ -265,8 +265,11 @@ NSData *IOSPYCaptureScreenJPEG(CGFloat maxDimension, CGFloat quality,
 
         double encodeStart = nowMs();
         NSMutableData *data = [NSMutableData data];
+        // Newer iOS SDKs no longer expose kUTTypeJPEG from the legacy header,
+        // while the canonical UTI value itself remains unchanged.
         CGImageDestinationRef dest =
-            CGImageDestinationCreateWithData((__bridge CFMutableDataRef)data, kUTTypeJPEG, 1, NULL);
+            CGImageDestinationCreateWithData((__bridge CFMutableDataRef)data,
+                                             CFSTR("public.jpeg"), 1, NULL);
         BOOL ok = NO;
         if (dest) {
             NSDictionary *options = @{(__bridge id)kCGImageDestinationLossyCompressionQuality: @(quality)};
