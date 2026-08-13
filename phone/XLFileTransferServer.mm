@@ -14,6 +14,8 @@
 #include <unistd.h>
 
 static const uint64_t XLMaximumFileSize = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+static const uint32_t XLMaximumFolderMetadataSize = 16U * 1024U * 1024U;
+static const NSUInteger XLMaximumFolderEntries = 100000;
 static NSString *const XLLocalFileProviderGroupIdentifier =
     @"group.com.apple.FileProvider.LocalStorage";
 
@@ -123,7 +125,7 @@ static void XLRepairTransferDirectoryPermissions(NSString *directory) {
     if (!directory.length) return;
     XLApplyMobilePermissions(directory, 0755);
     NSFileManager *manager = NSFileManager.defaultManager;
-    NSArray<NSString *> *entries = [manager contentsOfDirectoryAtPath:directory error:nil];
+    NSDirectoryEnumerator<NSString *> *entries = [manager enumeratorAtPath:directory];
     for (NSString *entry in entries) {
         NSString *path = [directory stringByAppendingPathComponent:entry];
         BOOL isDirectory = NO;
@@ -131,6 +133,168 @@ static void XLRepairTransferDirectoryPermissions(NSString *directory) {
             XLApplyMobilePermissions(path, isDirectory ? 0755 : 0644);
         }
     }
+}
+
+static NSString *XLSafeRelativePath(id rawValue) {
+    if (![rawValue isKindOfClass:NSString.class]) return nil;
+    NSString *rawPath = [(NSString *)rawValue stringByReplacingOccurrencesOfString:@"\\"
+                                                                        withString:@"/"];
+    if (!rawPath.length || [rawPath hasPrefix:@"/"] ||
+        [rawPath rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound) {
+        return nil;
+    }
+    NSArray<NSString *> *components = [rawPath componentsSeparatedByString:@"/"];
+    NSMutableArray<NSString *> *safeComponents = [NSMutableArray arrayWithCapacity:components.count];
+    NSCharacterSet *forbidden = [NSCharacterSet characterSetWithCharactersInString:@":"];
+    for (NSString *component in components) {
+        if (!component.length || [component isEqualToString:@"."] ||
+            [component isEqualToString:@".."] ||
+            [component rangeOfCharacterFromSet:forbidden].location != NSNotFound) {
+            return nil;
+        }
+        [safeComponents addObject:component];
+    }
+    return [safeComponents componentsJoinedByString:@"/"];
+}
+
+static BOOL XLReceiveFilePayload(int client, NSString *destination, uint64_t fileLength) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSString *parent = destination.stringByDeletingLastPathComponent;
+    if (![manager createDirectoryAtPath:parent
+             withIntermediateDirectories:YES
+                              attributes:nil
+                                   error:nil]) {
+        return NO;
+    }
+    if (![manager createFileAtPath:destination contents:nil attributes:nil]) return NO;
+
+    NSFileHandle *output = [NSFileHandle fileHandleForWritingAtPath:destination];
+    if (!output) {
+        [manager removeItemAtPath:destination error:nil];
+        return NO;
+    }
+
+    BOOL receivedSuccessfully = YES;
+    uint64_t remaining = fileLength;
+    uint8_t buffer[256 * 1024];
+    @try {
+        while (remaining > 0) {
+            size_t wanted = (size_t)MIN((uint64_t)sizeof(buffer), remaining);
+            ssize_t received = recv(client, buffer, wanted, 0);
+            if (received <= 0) {
+                receivedSuccessfully = NO;
+                break;
+            }
+            [output writeData:[NSData dataWithBytesNoCopy:buffer
+                                                   length:(NSUInteger)received
+                                             freeWhenDone:NO]];
+            remaining -= (uint64_t)received;
+        }
+        [output synchronizeFile];
+        [output closeFile];
+    } @catch (__unused NSException *exception) {
+        receivedSuccessfully = NO;
+        @try {
+            [output closeFile];
+        } @catch (__unused NSException *ignored) {
+        }
+    }
+
+    if (!receivedSuccessfully || remaining != 0) {
+        [manager removeItemAtPath:destination error:nil];
+        return NO;
+    }
+    XLApplyMobilePermissions(destination, 0644);
+    return YES;
+}
+
+static BOOL XLReceiveFolderPayload(int client,
+                                   NSDictionary *metadata,
+                                   uint64_t payloadLength,
+                                   NSString *transferDirectory,
+                                   NSString **savedPath,
+                                   NSString **failureMessage) {
+    NSArray *entries = metadata[@"entries"];
+    if (![entries isKindOfClass:NSArray.class] || entries.count > XLMaximumFolderEntries) {
+        if (failureMessage) *failureMessage = @"文件夹目录清单无效";
+        return NO;
+    }
+
+    NSMutableArray<NSDictionary *> *validated = [NSMutableArray arrayWithCapacity:entries.count];
+    uint64_t expectedPayloadLength = 0;
+    for (id rawEntry in entries) {
+        if (![rawEntry isKindOfClass:NSDictionary.class]) {
+            if (failureMessage) *failureMessage = @"文件夹目录项无法识别";
+            return NO;
+        }
+        NSDictionary *entry = (NSDictionary *)rawEntry;
+        NSString *relativePath = XLSafeRelativePath(entry[@"path"]);
+        if (!relativePath.length) {
+            if (failureMessage) *failureMessage = @"文件夹包含不安全路径";
+            return NO;
+        }
+        BOOL isDirectory = [entry[@"directory"] boolValue];
+        uint64_t size = 0;
+        if (!isDirectory) {
+            id rawSize = entry[@"size"];
+            if (![rawSize isKindOfClass:NSNumber.class] || [rawSize longLongValue] < 0) {
+                if (failureMessage) *failureMessage = @"文件夹中的文件大小无效";
+                return NO;
+            }
+            size = [rawSize unsignedLongLongValue];
+            if (size > XLMaximumFileSize ||
+                expectedPayloadLength > XLMaximumFileSize - size) {
+                if (failureMessage) *failureMessage = @"文件夹内容合计超过 8GB";
+                return NO;
+            }
+            expectedPayloadLength += size;
+        }
+        [validated addObject:@{
+            @"path" : relativePath,
+            @"directory" : @(isDirectory),
+            @"size" : @(size),
+        }];
+    }
+    if (expectedPayloadLength != payloadLength) {
+        if (failureMessage) *failureMessage = @"文件夹数据长度与目录清单不一致";
+        return NO;
+    }
+
+    NSString *folderName = XLSafeFileName([metadata[@"name"] description]);
+    if (!folderName.length) folderName = @"received-folder";
+    NSString *rootDestination = XLUniqueDestination(transferDirectory, folderName);
+    NSFileManager *manager = NSFileManager.defaultManager;
+    if (![manager createDirectoryAtPath:rootDestination
+             withIntermediateDirectories:YES
+                              attributes:nil
+                                   error:nil]) {
+        if (failureMessage) *failureMessage = @"无法创建手机端文件夹";
+        return NO;
+    }
+
+    for (NSDictionary *entry in validated) {
+        NSString *destination = [rootDestination stringByAppendingPathComponent:entry[@"path"]];
+        if ([entry[@"directory"] boolValue]) {
+            if (![manager createDirectoryAtPath:destination
+                     withIntermediateDirectories:YES
+                                      attributes:nil
+                                           error:nil]) {
+                [manager removeItemAtPath:rootDestination error:nil];
+                if (failureMessage) *failureMessage = @"无法创建手机端子目录";
+                return NO;
+            }
+            continue;
+        }
+        if (!XLReceiveFilePayload(client, destination, [entry[@"size"] unsignedLongLongValue])) {
+            [manager removeItemAtPath:rootDestination error:nil];
+            if (failureMessage) *failureMessage = @"USB传输中断，未保留残缺文件夹";
+            return NO;
+        }
+    }
+
+    XLRepairTransferDirectoryPermissions(rootDestination);
+    if (savedPath) *savedPath = rootDestination;
+    return YES;
 }
 
 static void XLImportMediaAtPath(NSString *path) {
@@ -163,8 +327,13 @@ static void XLHandleFileClient(int client) {
 
         do {
             uint8_t header[16] = {0};
-            if (!XLFileReadAll(client, header, sizeof(header)) ||
-                memcmp(header, "XLFT", 4) != 0) {
+            if (!XLFileReadAll(client, header, sizeof(header))) {
+                XLSendFileResult(client, NO, @"文件协议错误", nil);
+                break;
+            }
+            BOOL isSingleFile = memcmp(header, "XLFT", 4) == 0;
+            BOOL isFolder = memcmp(header, "XLFD", 4) == 0;
+            if (!isSingleFile && !isFolder) {
                 XLSendFileResult(client, NO, @"文件协议错误", nil);
                 break;
             }
@@ -175,8 +344,11 @@ static void XLHandleFileClient(int client) {
             memcpy(&fileLengthBE, header + 8, sizeof(fileLengthBE));
             uint32_t metadataLength = ntohl(metadataLengthBE);
             uint64_t fileLength = CFSwapInt64BigToHost(fileLengthBE);
-            if (metadataLength == 0 || metadataLength > 64 * 1024 ||
-                fileLength == 0 || fileLength > XLMaximumFileSize) {
+            uint32_t maximumMetadataLength = isFolder
+                ? XLMaximumFolderMetadataSize
+                : 64U * 1024U;
+            if (metadataLength == 0 || metadataLength > maximumMetadataLength ||
+                (isSingleFile && fileLength == 0) || fileLength > XLMaximumFileSize) {
                 XLSendFileResult(client, NO, @"文件大小或信息无效", nil);
                 break;
             }
@@ -193,8 +365,6 @@ static void XLHandleFileClient(int client) {
                 break;
             }
 
-            NSString *fileName = XLSafeFileName([metadata[@"name"] description]);
-            BOOL importPhoto = [metadata[@"importPhoto"] boolValue];
             NSString *directory = XLTransferDocumentsDirectory();
             NSError *directoryError = nil;
             if (![NSFileManager.defaultManager createDirectoryAtPath:directory
@@ -207,54 +377,26 @@ static void XLHandleFileClient(int client) {
             }
             XLRepairTransferDirectoryPermissions(directory);
 
+            if (isFolder) {
+                NSString *savedPath = nil;
+                NSString *failureMessage = nil;
+                if (!XLReceiveFolderPayload(client, metadata, fileLength, directory,
+                                            &savedPath, &failureMessage)) {
+                    XLSendFileResult(client, NO,
+                        failureMessage ?: @"文件夹传输失败", nil);
+                    break;
+                }
+                XLSendFileResult(client, YES, @"文件夹已保存", savedPath);
+                break;
+            }
+
+            NSString *fileName = XLSafeFileName([metadata[@"name"] description]);
+            BOOL importPhoto = [metadata[@"importPhoto"] boolValue];
             NSString *destination = XLUniqueDestination(directory, fileName);
-            if (![NSFileManager.defaultManager createFileAtPath:destination
-                                                        contents:nil
-                                                      attributes:nil]) {
-                XLSendFileResult(client, NO, @"无法创建手机端文件", nil);
-                break;
-            }
-
-            NSFileHandle *output = [NSFileHandle fileHandleForWritingAtPath:destination];
-            if (!output) {
-                [NSFileManager.defaultManager removeItemAtPath:destination error:nil];
-                XLSendFileResult(client, NO, @"无法打开手机端文件", nil);
-                break;
-            }
-
-            BOOL receivedSuccessfully = YES;
-            uint64_t remaining = fileLength;
-            uint8_t buffer[256 * 1024];
-            @try {
-                while (remaining > 0) {
-                    size_t wanted = (size_t)MIN((uint64_t)sizeof(buffer), remaining);
-                    ssize_t received = recv(client, buffer, wanted, 0);
-                    if (received <= 0) {
-                        receivedSuccessfully = NO;
-                        break;
-                    }
-                    [output writeData:[NSData dataWithBytesNoCopy:buffer
-                                                           length:(NSUInteger)received
-                                                     freeWhenDone:NO]];
-                    remaining -= (uint64_t)received;
-                }
-                [output synchronizeFile];
-                [output closeFile];
-            } @catch (__unused NSException *exception) {
-                receivedSuccessfully = NO;
-                @try {
-                    [output closeFile];
-                } @catch (__unused NSException *ignored) {
-                }
-            }
-
-            if (!receivedSuccessfully || remaining != 0) {
-                [NSFileManager.defaultManager removeItemAtPath:destination error:nil];
+            if (!XLReceiveFilePayload(client, destination, fileLength)) {
                 XLSendFileResult(client, NO, @"USB传输中断，未保留残缺文件", nil);
                 break;
             }
-
-            XLApplyMobilePermissions(destination, 0644);
 
             if (importPhoto) XLImportMediaAtPath(destination);
             NSString *message = importPhoto
@@ -285,7 +427,7 @@ static void XLRunFileTransferServer(void) {
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(XLFileTransferPort);
     if (bind(server, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        listen(server, 8) != 0) {
+        listen(server, 16) != 0) {
         close(server);
         return;
     }

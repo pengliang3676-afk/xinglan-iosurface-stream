@@ -25,17 +25,6 @@ class ConfigRecorder:
         self.values.update(values)
 
 
-class TouchManagerRecorder:
-    enabled = True
-
-    def __init__(self) -> None:
-        self.touches: dict[str, list[tuple[int, float, float]]] = {}
-
-    def send_touch(self, udid: str, kind: int, x: float, y: float) -> bool:
-        self.touches.setdefault(udid, []).append((kind, x, y))
-        return True
-
-
 class Session:
     def __init__(self, udid: str) -> None:
         self.udid = udid
@@ -72,7 +61,6 @@ def make_app(sync: bool) -> tuple[XinglanApp, dict[str, Session]]:
     app.summary = Value("")
     app._ime_source = None
     app._ime_from_master = False
-    app.touch_manager = TouchManagerRecorder()
     app.device_label = lambda udid: udid
     app._current_group_udids = lambda: ["master", "checked", "unchecked"]
     return app, sessions
@@ -90,16 +78,16 @@ class SyncSelectionTests(unittest.TestCase):
     def test_master_touch_syncs_only_to_checked_peer(self) -> None:
         app, sessions = make_app(sync=True)
         app.route_touch(sessions["master"], 1, 0.25, 0.75, from_master=True)
-        self.assertEqual(1, len(app.touch_manager.touches["master"]))
-        self.assertEqual(1, len(app.touch_manager.touches["checked"]))
-        self.assertNotIn("unchecked", app.touch_manager.touches)
+        self.assertEqual(1, len(sessions["master"].touches))
+        self.assertEqual(1, len(sessions["checked"].touches))
+        self.assertEqual(0, len(sessions["unchecked"].touches))
 
     def test_small_window_touch_never_broadcasts(self) -> None:
         app, sessions = make_app(sync=True)
         app.route_touch(sessions["master"], 1, 0.25, 0.75, from_master=False)
-        self.assertEqual(1, len(app.touch_manager.touches["master"]))
-        self.assertNotIn("checked", app.touch_manager.touches)
-        self.assertNotIn("unchecked", app.touch_manager.touches)
+        self.assertEqual(1, len(sessions["master"].touches))
+        self.assertEqual(0, len(sessions["checked"].touches))
+        self.assertEqual(0, len(sessions["unchecked"].touches))
 
     def test_small_window_system_shortcut_never_broadcasts(self) -> None:
         app, sessions = make_app(sync=True)

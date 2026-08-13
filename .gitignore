@@ -1,11 +1,15 @@
 __pycache__/
 *.py[cod]
 logs/
-build/*.zip
+artifact/
+build/
+backups/
+config/*.json
 phone/.theos/
 phone/obj/
 phone/packages/
 dist/
+release/
 .DS_Store
 .gh-config/
 .gh-local/

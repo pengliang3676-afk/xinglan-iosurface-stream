@@ -16,7 +16,6 @@ configure_dependencies()
 from PIL import Image  # noqa: E402
 
 from .control_protocol import (  # noqa: E402
-    CAPABILITY_TOUCH_STREAM,
     CONTROL_MAGIC,
     CONTROL_PORT,
     HEADER,
@@ -36,7 +35,6 @@ from .control_protocol import (  # noqa: E402
     pack_system_action,
     pack_text_input,
     pack_touch,
-    pack_touch_stream,
     unpack_ack,
     unpack_device_status,
     unpack_header,
@@ -51,7 +49,7 @@ from .protocol import (  # noqa: E402
 )
 from .video_decoder import create_h264_decoder  # noqa: E402
 
-from pymobiledevice3.service_connection import ServiceConnection  # noqa: E402
+from .usb_connection import ServiceConnection  # noqa: E402
 
 
 LOGGER = logging.getLogger("xinglan.session")
@@ -132,7 +130,6 @@ class SessionStats:
     phone_dropped_frames: int
     phone_control_errors: int
     decoder_backend: str
-    hardware_decode: bool
     decode_errors: int
 
 
@@ -147,9 +144,8 @@ class DeviceSession:
     CONTROL_PORT = CONTROL_PORT
     STATUS_PORT = STATUS_PORT
 
-    def __init__(self, udid: str, decoder_preference: str = "software") -> None:
+    def __init__(self, udid: str) -> None:
         self.udid = udid
-        self.decoder_preference = decoder_preference
         self.latest = LatestFrame()
         self._lock = threading.Lock()
         self._status = "等待连接"
@@ -161,18 +157,10 @@ class DeviceSession:
         self._status_received_at = 0.0
         self._device_status: DeviceStatus | None = None
         self._decoder_backend = "等待"
-        self._hardware_decode = False
         self._decode_errors = 0
         self._stop = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._control_queue: asyncio.Queue[ControlEnvelope] | None = None
-        # MOVE uses a latest-value mailbox. At most one marker is queued;
-        # subsequent coordinates overwrite the pending value instead of
-        # creating a FIFO trail that continues after mouse-up.
-        self._latest_touch_moves: dict[int, TouchCommand] = {}
-        self._touch_generation = 0
-        self._touch_marker_generations: set[int] = set()
-        self._touch_stream_supported = False
         self._decoder_reset = threading.Event()
         # The phone remembers recently executed system-action sequences so an
         # ACK loss followed by a USB reconnect cannot press Home twice.  Seed
@@ -192,8 +180,6 @@ class DeviceSession:
     def stop(self) -> None:
         self._stop.set()
         self.latest.clear()
-        self._latest_touch_moves.clear()
-        self._touch_marker_generations.clear()
         with self._lock:
             self._status = "已断开投屏"
             self._error = ""
@@ -203,10 +189,15 @@ class DeviceSession:
             self._status_received_at = 0.0
             self._device_status = None
             self._decoder_backend = "等待"
-            self._hardware_decode = False
         loop = self._loop
         if loop and loop.is_running():
             loop.call_soon_threadsafe(lambda: None)
+
+    def wait_stopped(self, timeout: float = 0.0) -> bool:
+        """Wait for the USB/decode thread to finish after stop was requested."""
+        if self._thread.is_alive() and timeout > 0:
+            self._thread.join(timeout=timeout)
+        return not self._thread.is_alive()
 
     def send_touch(self, kind: int, normalized_x: float, normalized_y: float) -> bool:
         try:
@@ -251,26 +242,6 @@ class DeviceSession:
             return False
 
         def enqueue_latest() -> None:
-            touch = envelope.value if envelope.kind == "touch" else None
-            if isinstance(touch, TouchCommand):
-                if touch.phase == TouchPhase.DOWN:
-                    # Every drag owns an independent generation. A delayed
-                    # marker from the preceding drag can therefore never read
-                    # coordinates belonging to the new drag.
-                    self._touch_generation += 1
-                elif touch.phase == TouchPhase.MOVE:
-                    generation = self._touch_generation
-                    self._latest_touch_moves[generation] = touch
-                    if generation in self._touch_marker_generations:
-                        return
-                    try:
-                        queue.put_nowait(
-                            ControlEnvelope("touch_move_latest", generation)
-                        )
-                        self._touch_marker_generations.add(generation)
-                    except asyncio.QueueFull:
-                        pass
-                    return
             if queue.full():
                 retained: list[ControlEnvelope] = []
                 removed_move = False
@@ -278,11 +249,10 @@ class DeviceSession:
                     queued = queue.get_nowait()
                     if (
                         not removed_move
-                        and queued.kind == "touch_move_latest"
+                        and queued.kind == "touch"
+                        and isinstance(queued.value, TouchCommand)
+                        and queued.value.phase == TouchPhase.MOVE
                     ):
-                        if isinstance(queued.value, int):
-                            self._touch_marker_generations.discard(queued.value)
-                            self._latest_touch_moves.pop(queued.value, None)
                         removed_move = True
                         continue
                     retained.append(queued)
@@ -327,7 +297,6 @@ class DeviceSession:
                 phone_status.dropped_frames if phone_status else 0,
                 phone_status.control_errors if phone_status else 0,
                 self._decoder_backend,
-                self._hardware_decode,
                 self._decode_errors,
             )
 
@@ -354,15 +323,12 @@ class DeviceSession:
         if changed:
             LOGGER.info("device=%s status_online=%s", self.udid, online)
 
-    def _set_decoder_backend(self, name: str, hardware: bool) -> None:
+    def _set_decoder_backend(self, name: str) -> None:
         with self._lock:
-            changed = name != self._decoder_backend or hardware != self._hardware_decode
+            changed = name != self._decoder_backend
             self._decoder_backend = name
-            self._hardware_decode = hardware
         if changed:
-            LOGGER.info(
-                "device=%s decoder=%s hardware=%s", self.udid, name, hardware
-            )
+            LOGGER.info("device=%s decoder=%s", self.udid, name)
 
     def _publish_device_status(self, status: DeviceStatus) -> None:
         with self._lock:
@@ -462,9 +428,9 @@ class DeviceSession:
             raise ValueError(f"手机未运行星澜 XLV3 投屏服务：{magic!r}")
         header_bytes = magic + await read_exact(connection, VIDEO_HEADER_V3_SIZE - 4, 5.0)
         header = parse_video_header_v3(header_bytes)
-        decoder = create_h264_decoder(self.decoder_preference)
+        decoder = create_h264_decoder()
         try:
-            self._set_decoder_backend(decoder.name, decoder.hardware)
+            self._set_decoder_backend(decoder.name)
             self._set_state(
                 f"投屏中 {header.width}×{header.height} · {decoder.name} · {self.VIDEO_PORT}"
             )
@@ -487,26 +453,15 @@ class DeviceSession:
                     if not (packet.flags & 0x01):
                         continue
                     decoder.close()
-                    decoder = create_h264_decoder(self.decoder_preference)
-                    self._set_decoder_backend(decoder.name, decoder.hardware)
+                    decoder = create_h264_decoder()
+                    self._set_decoder_backend(decoder.name)
                     self._decoder_reset.clear()
                     LOGGER.info("device=%s decoder context recycled", self.udid)
                 try:
                     decoded = decoder.decode(payload)
-                except Exception as exc:
+                except Exception:
                     with self._lock:
                         self._decode_errors += 1
-                    if decoder.hardware:
-                        LOGGER.warning(
-                            "device=%s hardware decode failed, falling back: %s",
-                            self.udid,
-                            exc,
-                        )
-                        decoder.close()
-                        decoder = create_h264_decoder("software")
-                        self._set_decoder_backend(decoder.name, decoder.hardware)
-                        self.request_keyframe()
-                        continue
                     raise
                 for frame in decoded:
                     self.latest.publish(prepare_xlv3_image(frame.to_image()))
@@ -531,10 +486,7 @@ class DeviceSession:
         header, payload = await read_channel_message(connection, CONTROL_MAGIC, 2.0)
         if header.message_type != MessageType.HELLO_ACK or header.sequence != sequence:
             raise ValueError("控制通道握手响应不匹配")
-        hello = unpack_hello(payload)
-        self._touch_stream_supported = bool(
-            hello.capabilities & CAPABILITY_TOUCH_STREAM
-        )
+        unpack_hello(payload)
 
     async def _send_control_envelope(self, connection: Any, envelope: ControlEnvelope) -> None:
         sequence = self._next_sequence()
@@ -559,32 +511,6 @@ class DeviceSession:
             raise ValueError("控制 ACK 序列号不匹配")
         if acknowledgement.result_code != 0:
             raise RuntimeError(f"手机拒绝控制命令，代码 {acknowledgement.result_code}")
-
-    async def _send_latest_touch_move(
-        self,
-        connection: Any,
-        generation: int,
-    ) -> None:
-        # Clear the marker before awaiting I/O. If another MOVE arrives while
-        # writing, it creates one new marker and replaces this mailbox value.
-        self._touch_marker_generations.discard(generation)
-        command = self._latest_touch_moves.pop(generation, None)
-        if command is None:
-            return
-        if self._touch_stream_supported:
-            await asyncio.wait_for(
-                connection.sendall(
-                    pack_touch_stream(command, self._next_sequence())
-                ),
-                timeout=1.0,
-            )
-            return
-        # Phones on the preceding package keep the old ACK protocol, but MOVE
-        # is still coalesced to the newest position on the desktop.
-        await self._send_control_envelope(
-            connection,
-            ControlEnvelope("touch", command),
-        )
 
     async def _send_control_ping(self, connection: Any) -> None:
         sequence = self._next_sequence()
@@ -620,12 +546,7 @@ class DeviceSession:
                         except asyncio.TimeoutError:
                             await self._send_control_ping(connection)
                             continue
-                    if pending.kind == "touch_move_latest":
-                        if not isinstance(pending.value, int):
-                            raise ValueError("touch move marker missing generation")
-                        await self._send_latest_touch_move(connection, pending.value)
-                    else:
-                        await self._send_control_envelope(connection, pending)
+                    await self._send_control_envelope(connection, pending)
                     pending = None
             except asyncio.CancelledError:
                 raise
@@ -636,7 +557,6 @@ class DeviceSession:
                 delay = min(3.0, delay * 1.5)
             finally:
                 self._set_control_online(False)
-                self._touch_stream_supported = False
                 await self._close_channel(connection)
 
     async def _status_supervisor(self) -> None:

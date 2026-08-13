@@ -5,9 +5,35 @@ import sys
 from pathlib import Path
 
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
-WORKSPACE_DIR = PROJECT_DIR.parent.parent
-USB_DEPS = WORKSPACE_DIR / "usb_capture_deps"
+FROZEN = bool(getattr(sys, "frozen", False))
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+PROJECT_DIR = (
+    Path(sys.executable).resolve().parent
+    if FROZEN
+    else Path(__file__).resolve().parent.parent
+)
+
+
+def _first_existing(*candidates: Path) -> Path:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+# Source runs use the verified portable dependencies under D:\星澜.  The EXE
+# build places the same resources beside the executable, so runtime paths no
+# longer depend on the source tree being present.
+USB_DEPS = _first_existing(
+    PROJECT_DIR / "usb_capture_deps",
+    BUNDLE_DIR / "usb_capture_deps",
+    PROJECT_DIR.parent.parent / "usb_capture_deps",
+)
+USBMUX_TOOLS = _first_existing(
+    PROJECT_DIR / "independent-usbmux-test",
+    BUNDLE_DIR / "independent-usbmux-test",
+    PROJECT_DIR.parent / "independent-usbmux-test",
+)
 
 
 def configure_dependencies() -> None:
@@ -21,4 +47,3 @@ def configure_dependencies() -> None:
     dll_dir = USB_DEPS / "pywin32_system32"
     if os.name == "nt" and dll_dir.exists():
         os.add_dll_directory(str(dll_dir))
-

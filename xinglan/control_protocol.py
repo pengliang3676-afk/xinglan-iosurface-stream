@@ -30,10 +30,6 @@ class MessageType(enum.IntEnum):
     REQUEST_KEYFRAME = 12
     TEXT_INPUT = 13
     KEY_EVENT = 14
-    # High-frequency absolute touch positions. The phone intentionally does
-    # not ACK this message, so stale MOVE packets cannot pile up behind USB
-    # round trips. DOWN/UP/CANCEL remain acknowledged TOUCH messages.
-    TOUCH_STREAM = 15
     PING = 20
     PONG = 21
     ACK = 22
@@ -47,9 +43,6 @@ class TouchPhase(enum.IntEnum):
     DOWN = 1
     MOVE = 2
     CANCEL = 3
-
-
-CAPABILITY_TOUCH_STREAM = 1 << 7
 
 
 @dataclass(frozen=True)
@@ -210,20 +203,6 @@ def pack_touch(command: TouchCommand, sequence: int) -> bytes:
         command.timestamp_ms & 0xFFFFFFFF,
     )
     return pack_message(CONTROL_MAGIC, MessageType.TOUCH, sequence, payload)
-
-
-def pack_touch_stream(command: TouchCommand, sequence: int) -> bytes:
-    if command.phase != TouchPhase.MOVE:
-        raise ValueError("touch stream only accepts MOVE")
-    payload = TOUCH.pack(
-        int(command.phase),
-        command.finger & 0xFF,
-        _unit_to_u16(command.x),
-        _unit_to_u16(command.y),
-        _unit_to_u16(command.pressure),
-        command.timestamp_ms & 0xFFFFFFFF,
-    )
-    return pack_message(CONTROL_MAGIC, MessageType.TOUCH_STREAM, sequence, payload)
 
 
 def pack_system_action(action: SystemAction, sequence: int) -> bytes:

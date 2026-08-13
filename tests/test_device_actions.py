@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from xinglan.control_protocol import (
@@ -290,6 +291,76 @@ class DeviceActionTests(unittest.TestCase):
         self.assertEqual(result, {"a": True, "b": True, "c": True})
         legacy.assert_awaited_once_with(["a", "b", "c"], "sleep")
         verified.assert_awaited_once_with(["a", "b", "c"], "sleep")
+
+    def test_persistent_hub_verified_broadcast_merges_both_control_paths(self) -> None:
+        hub = PersistentDeviceActionHub.__new__(PersistentDeviceActionHub)
+        legacy_ready = asyncio.Event()
+        legacy_ready.set()
+        hub._channels = {"legacy": SimpleNamespace(ready=legacy_ready)}
+        hub._broadcast = AsyncMock(
+            return_value={"legacy": True}
+        )
+        verified = AsyncMock(
+            return_value={"modern": True, "failed": False}
+        )
+        with patch(
+            "xinglan.device_actions.send_action_to_devices",
+            new=verified,
+        ):
+            result = asyncio.run(
+                hub._broadcast_verified(
+                    ["legacy", "modern", "failed"],
+                    "sleep",
+                )
+            )
+
+        self.assertEqual(
+            {"legacy": True, "modern": True, "failed": False},
+            result,
+        )
+        hub._broadcast.assert_awaited_once_with(
+            ["legacy"],
+            "sleep",
+        )
+        verified.assert_awaited_once_with(
+            ["modern", "failed"],
+            "sleep",
+        )
+
+    def test_persistent_hub_verified_wake_returns_fallback_phones_home(self) -> None:
+        hub = PersistentDeviceActionHub.__new__(PersistentDeviceActionHub)
+        legacy_ready = asyncio.Event()
+        legacy_ready.set()
+        hub._channels = {"legacy": SimpleNamespace(ready=legacy_ready)}
+        hub._broadcast = AsyncMock(
+            return_value={"legacy": True}
+        )
+        completed = AsyncMock(
+            return_value={"modern": True, "failed": False}
+        )
+        with patch(
+            "xinglan.device_actions.send_action_sequence_to_devices",
+            new=completed,
+        ):
+            result = asyncio.run(
+                hub._broadcast_verified(
+                    ["legacy", "modern", "failed"],
+                    "wake",
+                )
+            )
+
+        self.assertEqual(
+            {"legacy": True, "modern": True, "failed": False},
+            result,
+        )
+        hub._broadcast.assert_awaited_once_with(
+            ["legacy"],
+            "wake",
+        )
+        completed.assert_awaited_once_with(
+            ["modern", "failed"],
+            ["wake", "home"],
+        )
 
     def test_identify_sleeps_then_wakes_phone_once(self) -> None:
         sender = AsyncMock(return_value=True)

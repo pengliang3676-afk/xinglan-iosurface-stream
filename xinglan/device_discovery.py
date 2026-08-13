@@ -4,9 +4,12 @@ import subprocess
 import time
 from pathlib import Path
 
+from .bootstrap import USBMUX_TOOLS
+
 
 def discover_usb_udids(project_dir: Path) -> list[str]:
-    tool = project_dir.parent / "independent-usbmux-test" / "idevice_id.exe"
+    del project_dir  # Kept in the public signature for existing callers/tests.
+    tool = USBMUX_TOOLS / "idevice_id.exe"
     if not tool.exists():
         raise FileNotFoundError(f"缺少USB设备工具：{tool}")
     completed = subprocess.run(

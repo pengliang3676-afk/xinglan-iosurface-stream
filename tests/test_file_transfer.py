@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from xinglan.file_transfer import (
     FileTransferResult,
+    build_folder_transfer_header,
     build_transfer_header,
     send_file_to_device,
     send_file_to_devices,
@@ -67,15 +68,56 @@ class FileTransferTests(unittest.TestCase):
         self.assertEqual(b"content", connection.sent[-1])
         self.assertTrue(connection.closed)
 
+    def test_folder_manifest_preserves_files_and_empty_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "资料"
+            (root / "子目录" / "空目录").mkdir(parents=True)
+            (root / "说明.txt").write_bytes(b"hello")
+            (root / "子目录" / "零字节.bin").write_bytes(b"")
+            header, metadata, files = build_folder_transfer_header(root)
+
+        self.assertEqual(b"XLFD", header[:4])
+        metadata_length, total_size = struct.unpack(">IQ", header[4:])
+        self.assertEqual(len(metadata), metadata_length)
+        self.assertEqual(5, total_size)
+        decoded = json.loads(metadata.decode("utf-8"))
+        self.assertEqual("资料", decoded["name"])
+        self.assertIn(
+            {"path": "子目录/空目录", "directory": True}, decoded["entries"]
+        )
+        self.assertIn(
+            {"path": "子目录/零字节.bin", "size": 0}, decoded["entries"]
+        )
+        self.assertEqual(2, len(files))
+
+    def test_folder_is_sent_over_one_usb_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "folder"
+            root.mkdir()
+            (root / "a.txt").write_bytes(b"A")
+            (root / "b.txt").write_bytes(b"BC")
+            connection = FakeConnection()
+            create = AsyncMock(return_value=connection)
+            with patch(
+                "xinglan.file_transfer.ServiceConnection.create_using_usbmux",
+                new=create,
+            ):
+                result = asyncio.run(send_file_to_device("device-01", root, True))
+
+        self.assertTrue(result.success)
+        self.assertEqual(b"XLFD", connection.sent[0][:4])
+        self.assertEqual([b"A", b"BC"], connection.sent[-2:])
+        self.assertTrue(connection.closed)
+
     def test_multi_device_transfer_deduplicates_targets(self) -> None:
         sender = AsyncMock(return_value=FileTransferResult(True, "ok"))
-        with patch("xinglan.file_transfer.send_file_to_device", new=sender):
-            result = asyncio.run(
-                send_file_to_devices(["a", "b", "a"], Path("file.bin"))
-            )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "file.bin"
+            path.write_bytes(b"data")
+            with patch("xinglan.file_transfer._send_prepared_to_device", new=sender):
+                result = asyncio.run(send_file_to_devices(["a", "b", "a"], path))
         self.assertEqual(["a", "b"], list(result))
         self.assertEqual(2, sender.await_count)
-
 
 if __name__ == "__main__":
     unittest.main()

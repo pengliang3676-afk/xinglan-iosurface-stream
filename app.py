@@ -7,9 +7,10 @@ import gc
 import logging
 import multiprocessing
 import os
+import sys
 import threading
+import time
 import tkinter as tk
-import tracemalloc
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -28,22 +29,15 @@ from xinglan.device_actions import (  # noqa: E402
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
 from xinglan.ime_worker_client import ImeWorkerClient  # noqa: E402
-from xinglan.ioscpy_touch import (  # noqa: E402
-    IoscpyTouchManager,
-    fit_image_bounds,
-    normalize_canvas_point,
-)
 from xinglan.keyboard_input import map_keypress  # noqa: E402
 from xinglan.music_player import MusicPlaybackError, WindowsMusicPlayer  # noqa: E402
 from xinglan.diagnostics import (  # noqa: E402
     ProcessLoadSampler,
-    StabilityMonitor,
     configure_logging,
     working_set_mb,
 )
 from xinglan.control_protocol import SystemAction  # noqa: E402
 from xinglan.session import DeviceSession  # noqa: E402
-from xinglan.video_decoder import probe_hardware_backend  # noqa: E402
 from xinglan.usb_repair import (  # noqa: E402
     UsbRepairResult,
     discover_windows_iphone_count,
@@ -307,7 +301,6 @@ class DeviceTile:
         self.last_sequence = -1
         self.last_move_at = 0
         self.dragging = False
-        self.last_touch_point: tuple[float, float] | None = None
         self.photo: ImageTk.PhotoImage | None = None
         self.render_size = (0, 0)
         self.image_bounds = (0, 0, tile_width, tile_height)
@@ -582,19 +575,6 @@ class DeviceTile:
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
         self.render_size = (canvas_width, canvas_height)
-        if self.owner.touch_manager.enabled:
-            bounds = fit_image_bounds(
-                canvas_width, canvas_height, image.width, image.height
-            )
-            left, top, right, bottom = bounds
-            rendered = Image.new("RGB", (canvas_width, canvas_height), "black")
-            resized = image.resize(
-                (right - left, bottom - top), Image.Resampling.LANCZOS
-            )
-            rendered.paste(resized, (left, top))
-            self.image_bounds = bounds
-            self._set_photo(rendered)
-            return
         # 小窗口优先填满卡片画布，避免手机画面与右侧操作栏之间留下黑边。
         target_size = (canvas_width, canvas_height)
         resized = image if image.size == target_size else image.resize(
@@ -603,20 +583,17 @@ class DeviceTile:
         self.image_bounds = (0, 0, canvas_width, canvas_height)
         self._set_photo(resized)
 
-    def _normalized(
-        self, event: tk.Event, *, clamp: bool = False
-    ) -> tuple[float, float] | None:
-        return normalize_canvas_point(
-            event.x, event.y, self.image_bounds, clamp=clamp
-        )
+    def _normalized(self, event: tk.Event) -> tuple[float, float] | None:
+        left, top, right, bottom = self.image_bounds
+        if event.x < left or event.x >= right or event.y < top or event.y >= bottom:
+            return None
+        return (event.x - left) / (right - left), (event.y - top) / (bottom - top)
 
     def _press(self, event: tk.Event) -> None:
         point = self._normalized(event)
         if point is None:
             return
         self.dragging = True
-        self.last_move_at = event.time
-        self.last_touch_point = point
         self.owner.route_touch(self.session, 1, *point, from_master=False)
 
     def _key_press(self, event: tk.Event) -> str | None:
@@ -633,24 +610,19 @@ class DeviceTile:
     def _move(self, event: tk.Event) -> None:
         if not self.dragging:
             return
-        if not self.owner.touch_manager.enabled:
-            now = event.time
-            if now - self.last_move_at < TOUCH_MOVE_INTERVAL_MS:
-                return
-            self.last_move_at = now
-        point = self._normalized(event, clamp=self.owner.touch_manager.enabled)
+        now = event.time
+        if now - self.last_move_at < TOUCH_MOVE_INTERVAL_MS:
+            return
+        self.last_move_at = now
+        point = self._normalized(event)
         if point is not None:
-            self.last_touch_point = point
             self.owner.route_touch(self.session, 2, *point, from_master=False)
 
     def _release(self, event: tk.Event) -> None:
         if not self.dragging:
             return
         self.dragging = False
-        point = self._normalized(event, clamp=self.owner.touch_manager.enabled)
-        if point is None:
-            point = self.last_touch_point
-        self.last_touch_point = None
+        point = self._normalized(event)
         if point is not None:
             self.owner.route_touch(self.session, 0, *point, from_master=False)
         self.owner.activate_ime(
@@ -740,7 +712,6 @@ class MasterView:
         self.last_sequence = -1
         self.last_move_at = 0
         self.dragging = False
-        self.last_touch_point: tuple[float, float] | None = None
         self.photo: ImageTk.PhotoImage | None = None
         self.render_size = (0, 0)
         width, height = MASTER_VIEW_SIZE
@@ -853,19 +824,6 @@ class MasterView:
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
         self.render_size = (canvas_width, canvas_height)
-        if self.owner.touch_manager.enabled:
-            bounds = fit_image_bounds(
-                canvas_width, canvas_height, image.width, image.height
-            )
-            left, top, right, bottom = bounds
-            rendered = Image.new("RGB", (canvas_width, canvas_height), "black")
-            resized = image.resize(
-                (right - left, bottom - top), Image.Resampling.LANCZOS
-            )
-            rendered.paste(resized, (left, top))
-            self.image_bounds = bounds
-            self._set_photo(rendered)
-            return
         target_size = (canvas_width, canvas_height)
         resized = image if image.size == target_size else image.resize(
             target_size, Image.Resampling.LANCZOS
@@ -880,12 +838,11 @@ class MasterView:
             # 下一轮刷新按新画布尺寸重绘当前最新帧。
             self.last_sequence = -1
 
-    def _normalized(
-        self, event: tk.Event, *, clamp: bool = False
-    ) -> tuple[float, float] | None:
-        return normalize_canvas_point(
-            event.x, event.y, self.image_bounds, clamp=clamp
-        )
+    def _normalized(self, event: tk.Event) -> tuple[float, float] | None:
+        left, top, right, bottom = self.image_bounds
+        if event.x < left or event.x >= right or event.y < top or event.y >= bottom:
+            return None
+        return (event.x - left) / (right - left), (event.y - top) / (bottom - top)
 
     def _press(self, event: tk.Event) -> None:
         if self.session is None:
@@ -894,8 +851,6 @@ class MasterView:
         if point is None:
             return
         self.dragging = True
-        self.last_move_at = event.time
-        self.last_touch_point = point
         self.owner.route_touch(self.session, 1, *point, from_master=True)
 
     def _key_press(self, event: tk.Event) -> str | None:
@@ -915,23 +870,18 @@ class MasterView:
     def _move(self, event: tk.Event) -> None:
         if not self.dragging or self.session is None:
             return
-        if not self.owner.touch_manager.enabled:
-            if event.time - self.last_move_at < TOUCH_MOVE_INTERVAL_MS:
-                return
-            self.last_move_at = event.time
-        point = self._normalized(event, clamp=self.owner.touch_manager.enabled)
+        if event.time - self.last_move_at < TOUCH_MOVE_INTERVAL_MS:
+            return
+        self.last_move_at = event.time
+        point = self._normalized(event)
         if point is not None:
-            self.last_touch_point = point
             self.owner.route_touch(self.session, 2, *point, from_master=True)
 
     def _release(self, event: tk.Event) -> None:
         if not self.dragging or self.session is None:
             return
         self.dragging = False
-        point = self._normalized(event, clamp=self.owner.touch_manager.enabled)
-        if point is None:
-            point = self.last_touch_point
-        self.last_touch_point = None
+        point = self._normalized(event)
         if point is not None:
             self.owner.route_touch(self.session, 0, *point, from_master=True)
         self.owner.activate_ime(
@@ -947,23 +897,14 @@ class XinglanApp:
         self,
         root: tk.Tk,
         max_devices: int = 10,
-        decoder_backend: str = "software",
-        stability_minutes: float = 0.0,
     ) -> None:
         self.root = root
-        self.touch_manager = IoscpyTouchManager(PROJECT_DIR)
         self.max_devices = max_devices
         self.max_groups = max(1, (max_devices + GROUP_SIZE - 1) // GROUP_SIZE)
-        self.decoder_backend = decoder_backend
         self.group_store = DeviceGroupStore(
             PROJECT_DIR / "config" / "device_groups.json",
             max_groups=self.max_groups,
             group_size=GROUP_SIZE,
-        )
-        self.stability_monitor = (
-            StabilityMonitor(stability_minutes * 60.0)
-            if stability_minutes > 0
-            else None
         )
         self.sessions: dict[str, DeviceSession] = {}
         # 提前为每台在线手机保持一条轻量级 USB 控制通道。顶部开屏/熄屏
@@ -988,6 +929,7 @@ class XinglanApp:
         self.windows_device_count: int | None = None
         self.usbmux_device_count = 0
         self._closing = False
+        self._retired_sessions: list[DeviceSession] = []
         self.music_player = WindowsMusicPlayer(MUSIC_TRACKS)
         self.music_track_index = 0
         self.music_playing = False
@@ -1319,14 +1261,14 @@ class XinglanApp:
         mode_row.grid(row=3, column=0, sticky="nsew", padx=2, pady=(1, 2))
         tk.Button(
             mode_row, text="全部投屏",
-            command=self.start_current_group,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
+            takefocus=False,
             font=MAIN_BUTTON_FONT,
         ).pack(side="left", fill="both", expand=True, padx=(0, 1))
         tk.Button(
             mode_row, text="全部停屏",
-            command=self.stop_current_group,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
+            takefocus=False,
             font=MAIN_BUTTON_FONT,
         ).pack(side="left", fill="both", expand=True, padx=(1, 0))
 
@@ -1371,7 +1313,12 @@ class XinglanApp:
 
         # 仍然只发送一次旧版原始 ``14\r\n`` / ``15\r\n``；区别只是
         # USB 通道已在扫描设备时准备好，按钮点击不再承担建连工作。
-        future = self.action_hub.broadcast(udids, action)
+        # Reinstalled RootHide phones may expose the acknowledged XLStream
+        # control service on 6203 without starting the legacy SpringBoard
+        # compatibility listener on 6000.  Keep the original instant legacy
+        # broadcast and run the acknowledged 6203 fallback in the same turn.
+        # WAKE also includes HOME so fallback phones enter SpringBoard.
+        future = self.action_hub.broadcast_verified(udids, action)
 
         def finished(done_future) -> None:
             try:
@@ -1857,26 +1804,38 @@ class XinglanApp:
 
     def _stop_udids(self, udids: list[str]) -> int:
         stopped = 0
+        stopped_udids: set[str] = set()
         for udid in udids:
             if udid not in self.active_udids:
                 continue
             old_session = self.sessions.get(udid)
             if old_session is not None:
                 old_session.stop()
-                self.touch_manager.stop(udid)
+                self._retired_sessions.append(old_session)
                 # 会话线程不可复用；保留USB设备卡片，但换成全新的待机会话。
-                self.sessions[udid] = DeviceSession(
-                    udid, decoder_preference=self.decoder_backend
-                )
+                self.sessions[udid] = DeviceSession(udid)
             self.active_udids.discard(udid)
+            stopped_udids.add(udid)
             stopped += 1
             LOGGER.info("manual projection stopped: %s", udid)
         if stopped:
+            if self._ime_source is not None and self._ime_source.udid in stopped_udids:
+                self.ime_worker.deactivate()
+                self._ime_source = None
+                self._ime_from_master = False
             # 给异步线程一点时间关闭USB通道，再主动回收PIL/Tk/PyAV对象。
             self.root.after(800, self._collect_released_resources)
         return stopped
 
     def _collect_released_resources(self) -> None:
+        self._retired_sessions = [
+            session
+            for session in self._retired_sessions
+            if not session.wait_stopped(timeout=0.0)
+        ]
+        if self._retired_sessions and not self._closing:
+            self.root.after(400, self._collect_released_resources)
+            return
         collected = gc.collect()
         LOGGER.info(
             "projection resources collected objects=%s active=%s memory=%.1fMB",
@@ -1893,7 +1852,6 @@ class XinglanApp:
         self._stop_udids([item for item in self.active_udids if item not in current_group])
         session = self.sessions[udid]
         session.start()
-        self.touch_manager.start(udid)
         self.active_udids.add(udid)
         self.master_udid = udid
         LOGGER.info("manual projection started: %s", udid)
@@ -1920,7 +1878,6 @@ class XinglanApp:
             if udid in self.active_udids:
                 continue
             self.sessions[udid].start()
-            self.touch_manager.start(udid)
             self.active_udids.add(udid)
             LOGGER.info("manual projection started: %s", udid)
             started += 1
@@ -1983,9 +1940,13 @@ class XinglanApp:
         self.route_system_action(SystemAction.APP_SWITCHER)
 
     def open_file_transfer(self) -> None:
+        # 打开窗口时固定当前下拉框选中的一组。文件只发给这一组中
+        # 已经连接投屏的手机，不再把相邻三组扩展为30台目标。
+        group_number = self._current_group_index() + 1
+        group_label = f"第{group_number}组"
         window = tk.Toplevel(self.root)
         window.title("传输电脑文件到手机")
-        window.geometry("560x330")
+        window.geometry("640x330")
         window.resizable(False, False)
         window.configure(bg="#101828")
         window.transient(self.root)
@@ -2003,15 +1964,20 @@ class XinglanApp:
         window.geometry(f"{dialog_w}x{dialog_h}+{center_x}+{center_y}")
 
         selected_path = tk.StringVar(value="")
-        selected_text = tk.StringVar(value="尚未选择文件")
+        selected_text = tk.StringVar(value="尚未选择文件或文件夹")
         target_text = tk.StringVar()
         target_count_text = tk.StringVar()
-        progress_text = tk.StringVar(value="请选择文件后开始传输")
+        progress_text = tk.StringVar(value="请选择文件或文件夹后开始传输")
         import_photo = tk.BooleanVar(value=False)
         transferring = tk.BooleanVar(value=False)
 
         def current_targets() -> list[str]:
-            return self._selected_control_udids()
+            positioned = self.group_store.positioned_devices(
+                self.sessions, group_number
+            )
+            return [
+                udid for _, udid in positioned if udid in self.active_udids
+            ]
 
         def refresh_target_text() -> None:
             targets = current_targets()
@@ -2021,10 +1987,10 @@ class XinglanApp:
                 labels = "、".join(self.device_label(udid) for udid in targets[:4])
                 if len(targets) > 4:
                     labels += "…"
-                target_text.set(f"接收目标：{labels}")
+                target_text.set(f"{group_label}接收目标：{labels}")
                 target_count_text.set(f"{len(targets)} 台")
             else:
-                target_text.set("接收目标：尚未选择主控或同步手机")
+                target_text.set(f"{group_label}接收目标：没有已连接投屏的手机")
                 target_count_text.set("")
 
         def choose_file() -> None:
@@ -2053,6 +2019,44 @@ class XinglanApp:
             if not media:
                 import_photo.set(False)
             progress_text.set("文件已就绪，点击“开始传输”")
+            photo_check.configure(state="normal")
+
+        def choose_folder() -> None:
+            value = filedialog.askdirectory(
+                parent=window,
+                title="选择要传输到手机的文件夹",
+                mustexist=True,
+            )
+            if not value:
+                return
+            path = Path(value)
+            selected_path.set(str(path))
+            file_count = 0
+            total_size = 0
+            try:
+                for item in path.rglob("*"):
+                    if item.is_file() and not item.is_symlink():
+                        file_count += 1
+                        total_size += item.stat().st_size
+            except OSError as exc:
+                selected_path.set("")
+                selected_text.set("尚未选择文件或文件夹")
+                progress_text.set(f"无法读取文件夹：{exc}")
+                return
+            if total_size >= 1024 * 1024 * 1024:
+                size_text = f"{total_size / (1024 ** 3):.2f} GB"
+            elif total_size >= 1024 * 1024:
+                size_text = f"{total_size / (1024 ** 2):.1f} MB"
+            elif total_size >= 1024:
+                size_text = f"{total_size / 1024:.1f} KB"
+            else:
+                size_text = f"{total_size} B"
+            selected_text.set(
+                f"已选择文件夹：{path.name} · {file_count} 个文件 · {size_text}"
+            )
+            import_photo.set(False)
+            photo_check.configure(state="disabled")
+            progress_text.set("文件夹已就绪，点击“开始传输”")
 
         def close_window() -> None:
             if transferring.get():
@@ -2062,25 +2066,26 @@ class XinglanApp:
         def start_transfer() -> None:
             path_text = selected_path.get()
             if not path_text:
-                progress_text.set("请先选择一个文件")
+                progress_text.set("请先选择文件或文件夹")
                 return
             path = Path(path_text)
-            if not path.is_file():
-                progress_text.set("所选文件已经不存在")
+            if not path.exists() or (not path.is_file() and not path.is_dir()):
+                progress_text.set("所选文件或文件夹已经不存在")
                 return
             targets = current_targets()
             refresh_target_text()
             if not targets:
-                progress_text.set("没有接收手机：请选择主控，或开启同步并勾选手机")
+                progress_text.set(f"{group_label}没有已连接投屏的接收手机")
                 return
             should_import_photo = import_photo.get()
             transferring.set(True)
             choose_button.configure(state="disabled")
+            choose_folder_button.configure(state="disabled")
             start_button.configure(state="disabled", text="正在传输…")
             close_button.configure(state="disabled")
-            progress_text.set(f"正在向 {len(targets)} 台手机传输，请稍候…")
+            progress_text.set(f"正在向{group_label} {len(targets)} 台手机传输，请稍候…")
             self.summary.set(
-                f"正在向 {len(targets)} 台手机传输 {path.name}…"
+                f"正在向{group_label} {len(targets)} 台手机传输 {path.name}…"
             )
 
             def completed(result) -> None:
@@ -2090,6 +2095,7 @@ class XinglanApp:
                     if window.winfo_exists():
                         progress_text.set(f"传输失败：{result}")
                         choose_button.configure(state="normal")
+                        choose_folder_button.configure(state="normal")
                         start_button.configure(state="normal", text="开始传输")
                         close_button.configure(state="normal")
                     return
@@ -2101,6 +2107,7 @@ class XinglanApp:
                     return
                 progress_text.set(message)
                 choose_button.configure(state="normal")
+                choose_folder_button.configure(state="normal")
                 start_button.configure(state="normal", text="开始传输")
                 close_button.configure(state="normal")
                 if failed:
@@ -2140,6 +2147,17 @@ class XinglanApp:
             pady=7,
         )
         choose_button.pack(side="left")
+        choose_folder_button = tk.Button(
+            file_row,
+            text="选择文件夹",
+            command=choose_folder,
+            bg="#2e90fa",
+            fg="white",
+            relief="flat",
+            padx=16,
+            pady=7,
+        )
+        choose_folder_button.pack(side="left", padx=(8, 0))
         tk.Label(
             file_row,
             textvariable=selected_text,
@@ -2147,7 +2165,7 @@ class XinglanApp:
             fg="#d0d5dd",
             anchor="w",
         ).pack(side="left", fill="x", expand=True, padx=12)
-        tk.Checkbutton(
+        photo_check = tk.Checkbutton(
             window,
             text="图片或视频传完后导入系统“照片”",
             variable=import_photo,
@@ -2156,7 +2174,8 @@ class XinglanApp:
             activebackground="#101828",
             activeforeground="white",
             selectcolor="#2e90fa",
-        ).pack(anchor="w", padx=20, pady=(18, 8))
+        )
+        photo_check.pack(anchor="w", padx=20, pady=(18, 8))
         target_row = tk.Frame(window, bg="#101828")
         target_row.pack(fill="x", padx=20, pady=4)
         tk.Label(
@@ -2340,7 +2359,7 @@ class XinglanApp:
         for udid in udids:
             if udid in self.sessions:
                 continue
-            session = DeviceSession(udid, decoder_preference=self.decoder_backend)
+            session = DeviceSession(udid)
             self.sessions[udid] = session
             # 与旧版一致：新出现在当前界面的手机默认处于勾选状态。
             self.selected_udids.add(udid)
@@ -2526,14 +2545,7 @@ class XinglanApp:
             )
         else:
             targets = [source]
-        if self.touch_manager.enabled:
-            accepted = sum(
-                1
-                for session in targets
-                if self.touch_manager.send_touch(session.udid, kind, x, y)
-            )
-        else:
-            accepted = sum(1 for session in targets if session.send_touch(kind, x, y))
+        accepted = sum(1 for session in targets if session.send_touch(kind, x, y))
         # 鼠标按下、移动和松开都是高频事件。正常发送时不改Tk状态文字，
         # 避免右侧分组下拉框和按钮跟随每次操作反复重绘、闪动。
         if accepted == 0 and kind in (0, 1):
@@ -2662,74 +2674,29 @@ class XinglanApp:
         stats = [session.stats() for session in active_sessions]
         total_fps = sum(item.fps for item in stats)
         reconnects = sum(item.reconnects for item in stats)
-        hardware_decoders = sum(1 for item in stats if item.hardware_decode)
-        software_decoders = sum(
-            1 for item in stats if item.decoder_backend == "软件"
-        )
         decode_errors = sum(item.decode_errors for item in stats)
         dropped_frames = sum(item.phone_dropped_frames for item in stats)
         ages = [item.last_frame_age for item in stats if item.last_frame_age is not None]
         max_age_ms = max(ages, default=0.0) * 1000
         memory_mb = working_set_mb()
         cpu_percent = self.load_sampler.sample_percent()
-        stability_text = ""
-        if self.stability_monitor is not None:
-            stability_text = (
-                f" · 稳测 {self.stability_monitor.elapsed_seconds / 60:.0f}/"
-                f"{self.stability_monitor.duration_seconds / 60:.0f}分"
-            )
         self.health.set(
             f"投屏 {len(stats)} 台 · 总帧率 {total_fps:.1f}"
             f" · CPU {cpu_percent:.0f}% · 内存 {memory_mb:.0f} MB"
-            f"{stability_text}"
         )
-        if self.stability_monitor is not None and self.stability_monitor.report_path is None:
-            self.stability_monitor.record(
-                devices=len(stats),
-                fps=total_fps,
-                cpu=cpu_percent,
-                memory_mb=memory_mb,
-                reconnects=reconnects,
-                decode_errors=decode_errors,
-                dropped_frames=dropped_frames,
-                max_frame_age_ms=max_age_ms,
-                hardware_decoders=hardware_decoders,
-            )
-            if self.stability_monitor.complete:
-                report = self.stability_monitor.write_report(
-                    PROJECT_DIR / "logs", self.decoder_backend
-                )
-                self.summary.set(f"十台稳定性测试完成：{report.name}")
-                LOGGER.info("stability test completed report=%s", report)
         self.health_tick += 1
         if self.health_tick % 10 == 0:
-            python_heap_mb = 0.0
-            python_peak_mb = 0.0
-            if tracemalloc.is_tracing():
-                current_bytes, peak_bytes = tracemalloc.get_traced_memory()
-                python_heap_mb = current_bytes / (1024 * 1024)
-                python_peak_mb = peak_bytes / (1024 * 1024)
             LOGGER.info(
-                "health devices=%s total_fps=%.1f hardware=%s software=%s cpu=%.1f%% memory=%.1fMB pyheap=%.1fMB pypeak=%.1fMB gc_objects=%s py_threads=%s reconnects=%s decode_errors=%s max_frame_age=%.0fms",
-                len(stats), total_fps, hardware_decoders, software_decoders,
-                cpu_percent, memory_mb, python_heap_mb, python_peak_mb,
+                "health devices=%s total_fps=%.1f cpu=%.1f%% memory=%.1fMB gc_objects=%s py_threads=%s reconnects=%s decode_errors=%s max_frame_age=%.0fms",
+                len(stats), total_fps,
+                cpu_percent, memory_mb,
                 len(gc.get_objects()), threading.active_count(),
                 reconnects, decode_errors, max_age_ms,
             )
-            if tracemalloc.is_tracing() and self.health_tick % 60 == 0:
-                top = tracemalloc.take_snapshot().statistics("filename")[:8]
-                LOGGER.info(
-                    "python heap top: %s",
-                    " | ".join(
-                        f"{item.traceback[0].filename}:{item.size / (1024 * 1024):.1f}MB/{item.count}"
-                        for item in top
-                    ),
-                )
         self.root.after(1000, self.refresh_health)
 
     def close(self) -> None:
         self._closing = True
-        self.touch_manager.close()
         self._hide_group_popup()
         self._stop_music(reset=True)
         if self._usb_count_after_id is not None:
@@ -2740,35 +2707,32 @@ class XinglanApp:
             self._usb_count_after_id = None
         self.action_hub.close()
         self.ime_worker.close()
-        if (
-            self.stability_monitor is not None
-            and self.stability_monitor.sample_count
-            and self.stability_monitor.report_path is None
-        ):
-            report = self.stability_monitor.write_report(
-                PROJECT_DIR / "logs", self.decoder_backend
-            )
-            LOGGER.info("partial stability report=%s", report)
         for session in self.sessions.values():
             session.stop()
+        deadline = time.monotonic() + 2.0
+        for session in [*self.sessions.values(), *self._retired_sessions]:
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                break
+            session.wait_stopped(timeout=remaining)
         self.root.after(120, self.root.destroy)
 
 
 def main() -> None:
     multiprocessing.freeze_support()
+    if "--ime-worker" in sys.argv:
+        sys.argv = [sys.argv[0], *(arg for arg in sys.argv[1:] if arg != "--ime-worker")]
+        from xinglan.ime_worker import main as ime_worker_main
+
+        ime_worker_main()
+        return
     parser = argparse.ArgumentParser(description="星澜 USB 原生群控新版")
     parser.add_argument("--max-devices", type=int, default=60)
-    parser.add_argument("--stability-minutes", type=float, default=0.0)
     args = parser.parse_args()
     log_path = configure_logging(PROJECT_DIR)
-    if os.environ.get("XINGLAN_TRACE_MEMORY", "").strip() == "1":
-        tracemalloc.start(1)
-        LOGGER.info("Python memory tracing enabled")
-    decoder_backend = probe_hardware_backend(PROJECT_DIR)
     LOGGER.info(
-        "application starting max_devices=%s decoder=%s log=%s",
+        "application starting max_devices=%s decoder=software log=%s",
         args.max_devices,
-        decoder_backend,
         log_path,
     )
     if os.name == "nt":
@@ -2784,8 +2748,6 @@ def main() -> None:
     XinglanApp(
         root,
         max(1, min(60, args.max_devices)),
-        decoder_backend=decoder_backend,
-        stability_minutes=max(0.0, args.stability_minutes),
     )
     root.mainloop()
 

@@ -67,7 +67,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertIs(second, image)
 
     def test_stopping_idle_session_releases_latest_frame(self) -> None:
-        session = DeviceSession("test-device", decoder_preference="software")
+        session = DeviceSession("test-device")
         session.latest.publish(Image.new("RGB", (360, 640), "blue"))
         session.stop()
         _, received_at, image = session.latest.snapshot()

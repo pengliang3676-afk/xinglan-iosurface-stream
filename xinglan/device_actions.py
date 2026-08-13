@@ -26,7 +26,7 @@ from .control_protocol import (
 
 configure_dependencies()
 
-from pymobiledevice3.service_connection import ServiceConnection  # noqa: E402
+from .usb_connection import ServiceConnection  # noqa: E402
 
 
 ACTION_MAP = {
@@ -504,6 +504,62 @@ class PersistentDeviceActionHub:
             self._broadcast(ordered, action),
             loop,
         )
+
+    def broadcast_verified(
+        self,
+        udids: Iterable[str],
+        action: str,
+    ) -> Future[dict[str, bool]]:
+        """Use legacy-ready channels and route missing listeners to port 6203.
+
+        This keeps the original one-command behaviour on healthy old plug-ins,
+        while freshly re-jailbroken RootHide phones whose port-6000 listener is
+        absent use the acknowledged 6203 service without receiving duplicates.
+        """
+        loop = self._loop
+        ordered = list(dict.fromkeys(udids))
+        if self._closed or loop is None or not loop.is_running():
+            failed: Future[dict[str, bool]] = Future()
+            failed.set_result({udid: False for udid in ordered})
+            return failed
+        return asyncio.run_coroutine_threadsafe(
+            self._broadcast_verified(ordered, action),
+            loop,
+        )
+
+    async def _broadcast_verified(
+        self,
+        udids: list[str],
+        action: str,
+    ) -> dict[str, bool]:
+        legacy_udids = [
+            udid
+            for udid in udids
+            if (channel := self._channels.get(udid)) is not None
+            and channel.ready.is_set()
+        ]
+        fallback_udids = [udid for udid in udids if udid not in set(legacy_udids)]
+        legacy_task = asyncio.create_task(self._broadcast(legacy_udids, action))
+        if action == "wake":
+            # Port 6000 preserves the legacy instant wake.  Fresh RootHide
+            # installs may expose only 6203, so the acknowledged fallback must
+            # also return those phones to SpringBoard just like the old top
+            # button did.
+            verified_operation = send_action_sequence_to_devices(
+                fallback_udids,
+                ["wake", "home"],
+            )
+        else:
+            verified_operation = send_action_to_devices(fallback_udids, action)
+        verified_task = asyncio.create_task(verified_operation)
+        legacy_result, verified_result = await asyncio.gather(
+            legacy_task,
+            verified_task,
+        )
+        return {
+            udid: bool(legacy_result.get(udid) or verified_result.get(udid))
+            for udid in udids
+        }
 
     async def _broadcast(self, udids: list[str], action: str) -> dict[str, bool]:
         async def send_one(udid: str) -> bool:

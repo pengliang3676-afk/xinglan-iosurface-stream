@@ -42,6 +42,22 @@ class ImeWorkerClient:
         pythonw = executable.with_name("pythonw.exe")
         return str(pythonw if pythonw.exists() else executable)
 
+    @classmethod
+    def _worker_command(cls, screen_x: int, screen_y: int) -> list[str]:
+        coordinates = [
+            "--x",
+            str(max(1, int(screen_x))),
+            "--y",
+            str(max(1, int(screen_y))),
+        ]
+        if getattr(sys, "frozen", False):
+            helper = Path(sys.executable).with_name("星澜输入.exe")
+            if helper.is_file():
+                return [str(helper), *coordinates]
+            return [sys.executable, "--ime-worker", *coordinates]
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        return [cls._worker_executable(), "-u", str(app_path), "--ime-worker", *coordinates]
+
     @staticmethod
     def _startup_info() -> subprocess.STARTUPINFO | None:
         if not hasattr(subprocess, "STARTUPINFO"):
@@ -56,16 +72,7 @@ class ImeWorkerClient:
             return
         self._generation += 1
         generation = self._generation
-        command = [
-            self._worker_executable(),
-            "-u",
-            "-m",
-            "xinglan.ime_worker",
-            "--x",
-            str(max(1, int(screen_x))),
-            "--y",
-            str(max(1, int(screen_y))),
-        ]
+        command = self._worker_command(screen_x, screen_y)
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         process = subprocess.Popen(
             command,
@@ -140,13 +147,37 @@ class ImeWorkerClient:
         self._process = None
         if process is None:
             return
+        # This method is called from Tk's mouse-release handler.  Waiting for a
+        # frozen helper process here blocks the whole UI for up to 1.6 seconds,
+        # which is especially visible in the packaged EXE.  Ask the old worker
+        # to stop immediately, then reap/kill it on a background thread.
         if process.poll() is None:
-            process.terminate()
             try:
-                process.wait(timeout=0.6)
-            except subprocess.TimeoutExpired:
+                process.terminate()
+            except OSError:
+                pass
+        threading.Thread(
+            target=self._reap_process,
+            args=(process,),
+            name="xinglan-ime-reaper",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _reap_process(process: subprocess.Popen[str]) -> None:
+        try:
+            process.wait(timeout=0.6)
+        except subprocess.TimeoutExpired:
+            try:
                 process.kill()
+            except OSError:
+                pass
+            try:
                 process.wait(timeout=1.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        except OSError:
+            pass
         if process.stdout is not None:
             try:
                 process.stdout.close()
