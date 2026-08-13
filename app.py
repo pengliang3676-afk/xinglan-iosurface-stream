@@ -119,9 +119,9 @@ class NativeTitleOverlay:
         self.root = root
         self.rel_x = rel_x
         self._after_id: str | None = None
-        self._raise_after_id: str | None = None
         self._last_geometry: str | None = None
         self._visible = False
+        self._native_styles_applied = False
         self.window = tk.Toplevel(root)
         self.window.withdraw()
         self.window.overrideredirect(True)
@@ -138,7 +138,6 @@ class NativeTitleOverlay:
         )
         root.bind("<Configure>", self._schedule_refresh, add="+")
         root.bind("<Map>", self._schedule_refresh, add="+")
-        root.bind("<FocusIn>", self._schedule_raise, add="+")
         root.bind("<Unmap>", self._hide, add="+")
         self._schedule_refresh()
 
@@ -156,23 +155,6 @@ class NativeTitleOverlay:
             except tk.TclError:
                 pass
         self._after_id = self.root.after(40, self._refresh)
-
-    def _schedule_raise(self, _event: tk.Event | None = None) -> None:
-        """Restore the caption overlay after Windows raises the main window."""
-        if self._raise_after_id is not None:
-            try:
-                self.root.after_cancel(self._raise_after_id)
-            except tk.TclError:
-                pass
-        self._raise_after_id = self.root.after(40, self._raise)
-
-    def _raise(self) -> None:
-        self._raise_after_id = None
-        try:
-            if self._visible and self.root.state() not in {"iconic", "withdrawn"}:
-                self.window.lift(self.root)
-        except tk.TclError:
-            self._hide()
 
     def _refresh(self) -> None:
         self._after_id = None
@@ -204,14 +186,51 @@ class NativeTitleOverlay:
                     height=self.HEIGHT,
                 )
                 self._last_geometry = geometry
-                if self._visible:
-                    self.window.lift(self.root)
             if not self._visible:
                 self.window.deiconify()
-                self.window.lift(self.root)
+                self.window.update_idletasks()
+                self._apply_native_styles()
                 self._visible = True
         except (OSError, tk.TclError):
             self._hide()
+
+    def _apply_native_styles(self) -> None:
+        """Keep the caption passive and owned without repeatedly raising it.
+
+        The previous FocusIn/lift cycle ran whenever a canvas or button received
+        focus, which made the caption visibly flash during phone interaction.
+        An owned Windows tool window naturally stays above its owner; the native
+        flags below also prevent focus activation and let mouse input pass through
+        to the real title bar.
+        """
+        if self._native_styles_applied or os.name != "nt":
+            return
+
+        user32 = ctypes.windll.user32
+        hwnd = wintypes.HWND(self.window.winfo_id())
+        user32.GetParent.argtypes = (wintypes.HWND,)
+        user32.GetParent.restype = wintypes.HWND
+        parent_hwnd = user32.GetParent(hwnd)
+        if parent_hwnd:
+            hwnd = parent_hwnd
+
+        gwl_exstyle = -20
+        ws_ex_transparent = 0x00000020
+        ws_ex_toolwindow = 0x00000080
+        ws_ex_noactivate = 0x08000000
+        get_window_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        set_window_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        get_window_long.argtypes = (wintypes.HWND, ctypes.c_int)
+        get_window_long.restype = ctypes.c_ssize_t
+        set_window_long.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t)
+        set_window_long.restype = ctypes.c_ssize_t
+        current_style = get_window_long(hwnd, gwl_exstyle)
+        set_window_long(
+            hwnd,
+            gwl_exstyle,
+            current_style | ws_ex_transparent | ws_ex_toolwindow | ws_ex_noactivate,
+        )
+        self._native_styles_applied = True
 
     def _window_metrics(self) -> tuple[int, int, int, int, int]:
         if os.name != "nt":
