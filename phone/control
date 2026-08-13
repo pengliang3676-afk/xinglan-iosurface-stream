@@ -1,9 +1,9 @@
 Package: com.jibeib.xlstream.safe
-Name: 星澜投屏
+Name: 星澜
 Depends: firmware (>= 15.0), ellekit | mobilesubstrate
 Provides: com.jibeib.xlstream
 Replaces: com.jibeib.xlstream
-Version: 0.8.2
+Version: 0.8.3
 Architecture: iphoneos-arm64e
 Description: XLStream USB video, group control, HID touch and recursive file or folder transfer for owned devices.
 Maintainer: jibeib

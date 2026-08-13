@@ -3,6 +3,12 @@
 #import <notify.h>
 #import <objc/message.h>
 
+#include <dlfcn.h>
+#include <spawn.h>
+#include <unistd.h>
+
+extern char **environ;
+
 @interface SBBacklightController : NSObject
 + (instancetype)sharedInstance;
 - (void)turnOnScreenFullyWithBacklightSource:(long long)source;
@@ -39,6 +45,61 @@ static const char *XLTextPasteCommitNotification = "com.jibeib.xlstream.text.pas
 static const char *XLTextPasteAckNotification = "com.jibeib.xlstream.text.paste.ack";
 static CFStringRef const XLTextDeleteNotification = CFSTR("com.jibeib.xlstream.text.delete");
 static CFStringRef const XLTextReturnNotification = CFSTR("com.jibeib.xlstream.text.return");
+
+static void XLConfigureRootPersona(posix_spawnattr_t *attributes) {
+    using SetPersona = int (*)(const posix_spawnattr_t *, uid_t, uint32_t);
+    using SetPersonaId = int (*)(const posix_spawnattr_t *, uid_t);
+
+    auto setPersona = reinterpret_cast<SetPersona>(
+        dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_np"));
+    auto setPersonaUid = reinterpret_cast<SetPersonaId>(
+        dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_uid_np"));
+    auto setPersonaGid = reinterpret_cast<SetPersonaId>(
+        dlsym(RTLD_DEFAULT, "posix_spawnattr_set_persona_gid_np"));
+    if (!setPersona || !setPersonaUid || !setPersonaGid) return;
+
+    setPersona(attributes, 99, 1);
+    setPersonaUid(attributes, 0);
+    setPersonaGid(attributes, 0);
+}
+
+static void XLStartStreamServiceAfterSpringBoard(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1200000000LL),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            const char *launcher = "/Applications/XLStream.app/XLStreamLauncher";
+            if (access(launcher, X_OK) != 0) {
+                NSLog(@"[XLSystemActions] launcher unavailable: %s", launcher);
+                return;
+            }
+
+            posix_spawnattr_t attributes;
+            int attrResult = posix_spawnattr_init(&attributes);
+            if (attrResult != 0) {
+                NSLog(@"[XLSystemActions] spawn attributes failed: %d", attrResult);
+                return;
+            }
+            XLConfigureRootPersona(&attributes);
+
+            pid_t process = -1;
+            char *const arguments[] = {
+                const_cast<char *>(launcher),
+                nullptr,
+            };
+            int result = posix_spawn(&process,
+                                     launcher,
+                                     nullptr,
+                                     &attributes,
+                                     arguments,
+                                     environ);
+            posix_spawnattr_destroy(&attributes);
+            NSLog(@"[XLSystemActions] launcher start result=%d pid=%d",
+                  result,
+                  process);
+        });
+    });
+}
 
 static UIResponder *XLFirstResponderInView(UIView *view) {
     if (view.isFirstResponder) return view;
@@ -405,7 +466,10 @@ static void XLRegisterSpringBoardActions(void) {
     @autoreleasepool {
         NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier ?: @"";
         if ([bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
-            dispatch_async(dispatch_get_main_queue(), ^{ XLRegisterSpringBoardActions(); });
+            dispatch_async(dispatch_get_main_queue(), ^{
+                XLRegisterSpringBoardActions();
+                XLStartStreamServiceAfterSpringBoard();
+            });
         } else {
             static XLTextInputReceiver *receiver;
             receiver = [XLTextInputReceiver new];

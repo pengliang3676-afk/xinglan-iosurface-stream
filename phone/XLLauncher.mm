@@ -2,8 +2,14 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/file.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -13,6 +19,50 @@ extern char **environ;
 namespace {
 volatile sig_atomic_t gStopRequested = 0;
 volatile sig_atomic_t gChildPid = -1;
+int gLauncherLock = -1;
+
+bool XLAcquireLauncherLock(void) {
+    const char *lockPath = "/var/mobile/Media/.xlstream-launcher.lock";
+    gLauncherLock = open(lockPath, O_CREAT | O_RDWR, 0644);
+    if (gLauncherLock < 0) {
+        NSLog(@"[XLStreamLauncher] lock open failed: %d", errno);
+        return false;
+    }
+    if (flock(gLauncherLock, LOCK_EX | LOCK_NB) != 0) {
+        NSLog(@"[XLStreamLauncher] another launcher already owns the service");
+        close(gLauncherLock);
+        gLauncherLock = -1;
+        return false;
+    }
+    ftruncate(gLauncherLock, 0);
+    dprintf(gLauncherLock, "%d\n", getpid());
+    return true;
+}
+
+bool XLPortIsListening(uint16_t port) {
+    int socketDescriptor = socket(AF_INET, SOCK_STREAM, 0);
+    if (socketDescriptor < 0) {
+        return false;
+    }
+
+    struct timeval timeout = {0, 150000};
+    setsockopt(socketDescriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(socketDescriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    struct sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bool listening = connect(socketDescriptor,
+                             reinterpret_cast<struct sockaddr *>(&address),
+                             sizeof(address)) == 0;
+    close(socketDescriptor);
+    return listening;
+}
+
+bool XLServiceIsAlreadyRunning(void) {
+    return XLPortIsListening(6202) || XLPortIsListening(6203) || XLPortIsListening(6204);
+}
 
 void XLHandleSignal(int signalNumber) {
     (void)signalNumber;
@@ -41,6 +91,17 @@ int main(int argc, char *argv[]) {
         signal(SIGTERM, XLHandleSignal);
         signal(SIGINT, XLHandleSignal);
         signal(SIGHUP, XLHandleSignal);
+
+        if (!XLAcquireLauncherLock()) {
+            return 0;
+        }
+
+        // During an in-place Sileo update the existing root daemon normally
+        // stays alive.  A SpringBoard restart must not start a second copy.
+        if (XLServiceIsAlreadyRunning()) {
+            NSLog(@"[XLStreamLauncher] service is already healthy");
+            return 0;
+        }
 
         NSString *servicePath = XLServicePath(argv[0]);
         NSLog(@"[XLStreamLauncher] launcher=%@ service=%@ uid=%d euid=%d",
@@ -90,6 +151,10 @@ int main(int argc, char *argv[]) {
             gChildPid = -1;
 
             if (!gStopRequested) {
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 73) {
+                    NSLog(@"[XLStreamLauncher] service lock is already owned");
+                    return 0;
+                }
                 NSLog(@"[XLStreamLauncher] service exited: %d", status);
                 sleep(2);
             }

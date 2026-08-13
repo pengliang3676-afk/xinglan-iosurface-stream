@@ -6,10 +6,40 @@
 #import "XLStatusServer.h"
 #import "XLVideoServer.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
+namespace {
+int gServiceLock = -1;
+
+bool XLAcquireServiceLock(void) {
+    const char *lockPath = "/var/mobile/Media/.xlstream-service.lock";
+    gServiceLock = open(lockPath, O_CREAT | O_RDWR, 0644);
+    if (gServiceLock < 0) {
+        NSLog(@"[XLStream] service lock open failed: %d", errno);
+        return false;
+    }
+    if (flock(gServiceLock, LOCK_EX | LOCK_NB) != 0) {
+        NSLog(@"[XLStream] another service instance is already running");
+        close(gServiceLock);
+        gServiceLock = -1;
+        return false;
+    }
+    ftruncate(gServiceLock, 0);
+    dprintf(gServiceLock, "%d\n", getpid());
+    return true;
+}
+}  // namespace
+
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
     @autoreleasepool {
+        if (!XLAcquireServiceLock()) {
+            return 73;
+        }
         UIDevice.currentDevice.batteryMonitoringEnabled = YES;
         XLStartControlServer();
         XLStartStatusServer();

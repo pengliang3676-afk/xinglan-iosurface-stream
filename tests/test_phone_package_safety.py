@@ -53,6 +53,33 @@ class PhonePackageSafetyTests(unittest.TestCase):
             info = plistlib.load(stream)
         self.assertEqual(fields["Version"], info["CFBundleShortVersionString"])
 
+    def test_springboard_starts_service_without_dpkg_scripts(self) -> None:
+        actions = (PHONE / "XLSystemActions.xm").read_text(encoding="utf-8")
+        launcher = (PHONE / "XLLauncher.mm").read_text(encoding="utf-8")
+        self.assertIn("XLStartStreamServiceAfterSpringBoard", actions)
+        self.assertIn('/Applications/XLStream.app/XLStreamLauncher', actions)
+        self.assertIn("posix_spawn(&process", actions)
+        self.assertIn("XLAcquireLauncherLock", launcher)
+        self.assertIn("LOCK_EX | LOCK_NB", launcher)
+        self.assertIn("XLServiceIsAlreadyRunning", launcher)
+        self.assertIn("XLPortIsListening(6203)", launcher)
+
+        daemon = (PHONE / "main.mm").read_text(encoding="utf-8")
+        self.assertIn("XLAcquireServiceLock", daemon)
+        self.assertIn(".xlstream-service.lock", daemon)
+        self.assertIn("return 73", daemon)
+
+    def test_app_is_visible_and_has_the_selected_icon(self) -> None:
+        info_path = PHONE / "layout" / "Applications" / "XLStream.app" / "Info.plist"
+        with info_path.open("rb") as stream:
+            info = plistlib.load(stream)
+        self.assertEqual("星澜", info["CFBundleDisplayName"])
+        self.assertEqual("星澜", info["CFBundleName"])
+        self.assertNotIn("SBAppTags", info)
+        for icon_name in ("Icon.png", "Icon@2x.png", "Icon@3x.png"):
+            self.assertIn(icon_name, info["CFBundleIconFiles"])
+            self.assertTrue((info_path.parent / icon_name).is_file())
+
     def test_package_uses_xlstream_hid_without_ioscpy_runtime(self) -> None:
         makefile = (PHONE / "Makefile").read_text(encoding="utf-8")
         self.assertIn("XLHIDSender.mm", makefile)
