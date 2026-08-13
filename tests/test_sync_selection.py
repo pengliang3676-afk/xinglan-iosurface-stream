@@ -25,15 +25,15 @@ class ConfigRecorder:
         self.values.update(values)
 
 
-class MenuRecorder:
+class TouchManagerRecorder:
+    enabled = True
+
     def __init__(self) -> None:
-        self.commands: list[tuple[str, object]] = []
+        self.touches: dict[str, list[tuple[int, float, float]]] = {}
 
-    def delete(self, _first: object, _last: object) -> None:
-        self.commands.clear()
-
-    def add_command(self, *, label: str, command: object) -> None:
-        self.commands.append((label, command))
+    def send_touch(self, udid: str, kind: int, x: float, y: float) -> bool:
+        self.touches.setdefault(udid, []).append((kind, x, y))
+        return True
 
 
 class Session:
@@ -72,6 +72,7 @@ def make_app(sync: bool) -> tuple[XinglanApp, dict[str, Session]]:
     app.summary = Value("")
     app._ime_source = None
     app._ime_from_master = False
+    app.touch_manager = TouchManagerRecorder()
     app.device_label = lambda udid: udid
     app._current_group_udids = lambda: ["master", "checked", "unchecked"]
     return app, sessions
@@ -89,16 +90,16 @@ class SyncSelectionTests(unittest.TestCase):
     def test_master_touch_syncs_only_to_checked_peer(self) -> None:
         app, sessions = make_app(sync=True)
         app.route_touch(sessions["master"], 1, 0.25, 0.75, from_master=True)
-        self.assertEqual(1, len(sessions["master"].touches))
-        self.assertEqual(1, len(sessions["checked"].touches))
-        self.assertEqual(0, len(sessions["unchecked"].touches))
+        self.assertEqual(1, len(app.touch_manager.touches["master"]))
+        self.assertEqual(1, len(app.touch_manager.touches["checked"]))
+        self.assertNotIn("unchecked", app.touch_manager.touches)
 
     def test_small_window_touch_never_broadcasts(self) -> None:
         app, sessions = make_app(sync=True)
         app.route_touch(sessions["master"], 1, 0.25, 0.75, from_master=False)
-        self.assertEqual(1, len(sessions["master"].touches))
-        self.assertEqual(0, len(sessions["checked"].touches))
-        self.assertEqual(0, len(sessions["unchecked"].touches))
+        self.assertEqual(1, len(app.touch_manager.touches["master"]))
+        self.assertNotIn("checked", app.touch_manager.touches)
+        self.assertNotIn("unchecked", app.touch_manager.touches)
 
     def test_small_window_system_shortcut_never_broadcasts(self) -> None:
         app, sessions = make_app(sync=True)
@@ -198,15 +199,14 @@ class SyncSelectionTests(unittest.TestCase):
     def test_group_menu_selection_changes_group_exactly_once(self) -> None:
         app, _ = make_app(sync=False)
         app.group_var = Value("第1组")
-        app.group_menu = MenuRecorder()
+        app.group_popup = None
         changes: list[str] = []
         app._group_changed = lambda _event=None: changes.append(app.group_var.get())
 
         app._set_group_menu_values(["第1组", "第2组"])
-        label, command = app.group_menu.commands[1]
-        command()
+        app._choose_group_from_popup("第2组")
 
-        self.assertEqual("第2组", label)
+        self.assertEqual(["第1组", "第2组"], app.group_values)
         self.assertEqual("第2组", app.group_var.get())
         self.assertEqual(["第2组"], changes)
 

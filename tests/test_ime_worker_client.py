@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from xinglan.ime_worker_client import ImeWorkerClient
 
@@ -14,6 +15,13 @@ class Root:
 
 
 class ImeWorkerClientTests(unittest.TestCase):
+    def test_startup_info_disables_windows_busy_cursor_feedback(self) -> None:
+        startup_info = ImeWorkerClient._startup_info()
+
+        if startup_info is None:
+            self.skipTest("STARTUPINFO is only available on Windows")
+        self.assertEqual(0x80, startup_info.dwFlags & 0x80)
+
     def test_poll_delivers_text_and_keys_on_main_thread(self) -> None:
         root = Root()
         texts: list[str] = []

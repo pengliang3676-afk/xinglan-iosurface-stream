@@ -11,6 +11,12 @@ from typing import Callable
 
 Message = list[object]
 
+# Windows normally shows the "app starting" busy ring beside the pointer when
+# the foreground process launches a helper.  The IME helper is intentionally
+# restarted after every phone click so its native IME memory can be reclaimed;
+# suppress only that cursor feedback and keep the existing lifetime policy.
+_STARTF_FORCEOFFFEEDBACK = 0x00000080
+
 
 class ImeWorkerClient:
     """Control a lightweight IME subprocess without importing the app there."""
@@ -35,6 +41,14 @@ class ImeWorkerClient:
         executable = Path(sys.executable)
         pythonw = executable.with_name("pythonw.exe")
         return str(pythonw if pythonw.exists() else executable)
+
+    @staticmethod
+    def _startup_info() -> subprocess.STARTUPINFO | None:
+        if not hasattr(subprocess, "STARTUPINFO"):
+            return None
+        startup_info = subprocess.STARTUPINFO()
+        startup_info.dwFlags |= _STARTF_FORCEOFFFEEDBACK
+        return startup_info
 
     def activate(self, screen_x: int, screen_y: int) -> None:
         self.deactivate()
@@ -64,6 +78,7 @@ class ImeWorkerClient:
             errors="replace",
             bufsize=1,
             creationflags=creation_flags,
+            startupinfo=self._startup_info(),
         )
         self._process = process
         threading.Thread(

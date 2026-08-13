@@ -11,6 +11,9 @@ from app import (
     BRAND_BANNER_HEIGHT,
     BRAND_BANNER_REL_X,
     BRAND_BANNER_WIDTH,
+    LEFT_RUNTIME_STATUS_WIDTH,
+    MASTER_BORDER_COLOR,
+    MASTER_BORDER_THICKNESS,
     MASTER_VIEW_SIZE,
     PHONE_HEAD_HEIGHT,
     RIGHT_PANEL_WIDTH,
@@ -19,6 +22,7 @@ from app import (
     TILE_CHECKBOX_SIZE,
     TILE_NUMBER_FONT_SIZE,
     TOP_BAR_HEIGHT,
+    WINDOWS_USB_REFRESH_MS,
     WALL_COLUMNS,
     WALL_GAP,
     WALL_ROWS,
@@ -49,12 +53,22 @@ class LayoutTests(unittest.TestCase):
         )
         self.assertTrue((PROJECT / "assets" / "xinglan.ico").is_file())
         self.assertEqual(330, STATUS_BLOCK_WIDTH)
+        self.assertEqual(260, LEFT_RUNTIME_STATUS_WIDTH)
+        self.assertEqual(30_000, WINDOWS_USB_REFRESH_MS)
         self.assertEqual(0, PHONE_HEAD_HEIGHT)
         self.assertEqual(44, SIDE_RAIL_WIDTH)
         self.assertEqual(32, TILE_CHECKBOX_SIZE)
         self.assertEqual(12, TILE_NUMBER_FONT_SIZE)
         self.assertEqual(3, WALL_GAP)
         self.assertEqual(360, RIGHT_PANEL_WIDTH)
+
+    def test_master_panel_uses_fixed_legacy_orange_border(self) -> None:
+        self.assertEqual("#d58b00", MASTER_BORDER_COLOR)
+        self.assertEqual(2, MASTER_BORDER_THICKNESS)
+        self.assertEqual(
+            MASTER_VIEW_SIZE[0],
+            RIGHT_PANEL_WIDTH - 2 * MASTER_BORDER_THICKNESS,
+        )
 
 
 if __name__ == "__main__":

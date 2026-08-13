@@ -28,7 +28,13 @@ from xinglan.device_actions import (  # noqa: E402
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
 from xinglan.ime_worker_client import ImeWorkerClient  # noqa: E402
+from xinglan.ioscpy_touch import (  # noqa: E402
+    IoscpyTouchManager,
+    fit_image_bounds,
+    normalize_canvas_point,
+)
 from xinglan.keyboard_input import map_keypress  # noqa: E402
+from xinglan.music_player import MusicPlaybackError, WindowsMusicPlayer  # noqa: E402
 from xinglan.diagnostics import (  # noqa: E402
     ProcessLoadSampler,
     StabilityMonitor,
@@ -38,6 +44,11 @@ from xinglan.diagnostics import (  # noqa: E402
 from xinglan.control_protocol import SystemAction  # noqa: E402
 from xinglan.session import DeviceSession  # noqa: E402
 from xinglan.video_decoder import probe_hardware_backend  # noqa: E402
+from xinglan.usb_repair import (  # noqa: E402
+    UsbRepairResult,
+    discover_windows_iphone_count,
+    repair_usb,
+)
 
 
 WALL_COLUMNS = 5
@@ -50,15 +61,26 @@ BRAND_BANNER_HEIGHT = 36
 BRAND_BANNER_WIDTH = 568
 BRAND_BANNER_REL_X = 0.4705
 STATUS_BLOCK_WIDTH = 330
+LEFT_RUNTIME_STATUS_WIDTH = 260
+WINDOWS_USB_REFRESH_MS = 30_000
 MOTTO_LINE_ONE = "日日精进，久久为功；功不唐捐，玉汝于成"
 MOTTO_LINE_TWO = "道阻且长，行则将至；行而不辍，未来可期"
 RIGHT_PANEL_WIDTH = 360
+MASTER_BORDER_COLOR = "#d58b00"
+MASTER_BORDER_THICKNESS = 2
+GROUP_SELECTOR_WIDTH = 80
+MUSIC_TRACKS = (
+    PROJECT_DIR / "assets" / "music" / "background-music.mp3",
+    PROJECT_DIR / "assets" / "music" / "shenhua-qinghua.wav",
+)
 PHONE_HEAD_HEIGHT = 0
 SIDE_RAIL_WIDTH = 44
 TILE_CHECKBOX_SIZE = 32
 TILE_NUMBER_FONT_SIZE = 12
+MAIN_BUTTON_FONT = ("Microsoft YaHei UI", 10, "bold")
 WALL_GAP = 3
-DISPLAY_INTERVAL_MS = 80
+DISPLAY_INTERVAL_MS = 40
+TOUCH_MOVE_INTERVAL_MS = 35
 LOGGER = logging.getLogger("xinglan.app")
 
 
@@ -285,6 +307,7 @@ class DeviceTile:
         self.last_sequence = -1
         self.last_move_at = 0
         self.dragging = False
+        self.last_touch_point: tuple[float, float] | None = None
         self.photo: ImageTk.PhotoImage | None = None
         self.render_size = (0, 0)
         self.image_bounds = (0, 0, tile_width, tile_height)
@@ -378,21 +401,21 @@ class DeviceTile:
             relief="flat",
             padx=2,
             pady=4,
-            font=("Microsoft YaHei UI", 8),
+            font=MAIN_BUTTON_FONT,
         )
         self.master_button.pack(fill="x", padx=3, pady=(0, 7))
         self.start_button = tk.Button(
             self.side, text="开始",
             command=lambda: self.owner.start_device(self.session.udid),
             bg="#1d2939", fg="white", relief="flat",
-            padx=1, pady=4, font=("Microsoft YaHei UI", 8),
+            padx=1, pady=4, font=MAIN_BUTTON_FONT,
         )
         self.start_button.pack(fill="x", padx=3, pady=2)
         self.stop_button = tk.Button(
             self.side, text="停止",
             command=lambda: self.owner.stop_device(self.session.udid),
             bg="#1d2939", fg="white", relief="flat",
-            padx=1, pady=4, font=("Microsoft YaHei UI", 8),
+            padx=1, pady=4, font=MAIN_BUTTON_FONT,
         )
         self.stop_button.pack(fill="x", padx=3, pady=2)
         self.single_action_buttons: list[tk.Button] = []
@@ -425,7 +448,7 @@ class DeviceTile:
                 relief="flat",
                 padx=1,
                 pady=4,
-                font=("Microsoft YaHei UI", 8),
+                font=MAIN_BUTTON_FONT,
             )
             button.pack(fill="x", padx=3, pady=2)
             self.single_action_buttons.append(button)
@@ -559,6 +582,19 @@ class DeviceTile:
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
         self.render_size = (canvas_width, canvas_height)
+        if self.owner.touch_manager.enabled:
+            bounds = fit_image_bounds(
+                canvas_width, canvas_height, image.width, image.height
+            )
+            left, top, right, bottom = bounds
+            rendered = Image.new("RGB", (canvas_width, canvas_height), "black")
+            resized = image.resize(
+                (right - left, bottom - top), Image.Resampling.LANCZOS
+            )
+            rendered.paste(resized, (left, top))
+            self.image_bounds = bounds
+            self._set_photo(rendered)
+            return
         # 小窗口优先填满卡片画布，避免手机画面与右侧操作栏之间留下黑边。
         target_size = (canvas_width, canvas_height)
         resized = image if image.size == target_size else image.resize(
@@ -567,17 +603,20 @@ class DeviceTile:
         self.image_bounds = (0, 0, canvas_width, canvas_height)
         self._set_photo(resized)
 
-    def _normalized(self, event: tk.Event) -> tuple[float, float] | None:
-        left, top, right, bottom = self.image_bounds
-        if event.x < left or event.x >= right or event.y < top or event.y >= bottom:
-            return None
-        return (event.x - left) / (right - left), (event.y - top) / (bottom - top)
+    def _normalized(
+        self, event: tk.Event, *, clamp: bool = False
+    ) -> tuple[float, float] | None:
+        return normalize_canvas_point(
+            event.x, event.y, self.image_bounds, clamp=clamp
+        )
 
     def _press(self, event: tk.Event) -> None:
         point = self._normalized(event)
         if point is None:
             return
         self.dragging = True
+        self.last_move_at = event.time
+        self.last_touch_point = point
         self.owner.route_touch(self.session, 1, *point, from_master=False)
 
     def _key_press(self, event: tk.Event) -> str | None:
@@ -594,19 +633,24 @@ class DeviceTile:
     def _move(self, event: tk.Event) -> None:
         if not self.dragging:
             return
-        now = event.time
-        if now - self.last_move_at < 35:
-            return
-        self.last_move_at = now
-        point = self._normalized(event)
+        if not self.owner.touch_manager.enabled:
+            now = event.time
+            if now - self.last_move_at < TOUCH_MOVE_INTERVAL_MS:
+                return
+            self.last_move_at = now
+        point = self._normalized(event, clamp=self.owner.touch_manager.enabled)
         if point is not None:
+            self.last_touch_point = point
             self.owner.route_touch(self.session, 2, *point, from_master=False)
 
     def _release(self, event: tk.Event) -> None:
         if not self.dragging:
             return
         self.dragging = False
-        point = self._normalized(event)
+        point = self._normalized(event, clamp=self.owner.touch_manager.enabled)
+        if point is None:
+            point = self.last_touch_point
+        self.last_touch_point = None
         if point is not None:
             self.owner.route_touch(self.session, 0, *point, from_master=False)
         self.owner.activate_ime(
@@ -673,7 +717,7 @@ class EmptySlot:
             tk.Button(
                 side, text=label, state="disabled",
                 bg="#1d2939", fg="#667085", relief="flat",
-                padx=1, pady=4, font=("Microsoft YaHei UI", 8),
+                padx=1, pady=4, font=MAIN_BUTTON_FONT,
             ).pack(fill="x", padx=3, pady=2)
 
     def grid(self, row: int, column: int) -> None:
@@ -696,6 +740,7 @@ class MasterView:
         self.last_sequence = -1
         self.last_move_at = 0
         self.dragging = False
+        self.last_touch_point: tuple[float, float] | None = None
         self.photo: ImageTk.PhotoImage | None = None
         self.render_size = (0, 0)
         width, height = MASTER_VIEW_SIZE
@@ -781,6 +826,7 @@ class MasterView:
         if width <= 1 or height <= 1:
             width, height = MASTER_VIEW_SIZE
         self.render_size = (width, height)
+        self.image_bounds = (0, 0, width, height)
         image = Image.new("RGB", (width, height), "#050a11")
         draw = ImageDraw.Draw(image)
         draw.text(
@@ -807,6 +853,19 @@ class MasterView:
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
         self.render_size = (canvas_width, canvas_height)
+        if self.owner.touch_manager.enabled:
+            bounds = fit_image_bounds(
+                canvas_width, canvas_height, image.width, image.height
+            )
+            left, top, right, bottom = bounds
+            rendered = Image.new("RGB", (canvas_width, canvas_height), "black")
+            resized = image.resize(
+                (right - left, bottom - top), Image.Resampling.LANCZOS
+            )
+            rendered.paste(resized, (left, top))
+            self.image_bounds = bounds
+            self._set_photo(rendered)
+            return
         target_size = (canvas_width, canvas_height)
         resized = image if image.size == target_size else image.resize(
             target_size, Image.Resampling.LANCZOS
@@ -821,11 +880,12 @@ class MasterView:
             # 下一轮刷新按新画布尺寸重绘当前最新帧。
             self.last_sequence = -1
 
-    def _normalized(self, event: tk.Event) -> tuple[float, float] | None:
-        left, top, right, bottom = self.image_bounds
-        if event.x < left or event.x >= right or event.y < top or event.y >= bottom:
-            return None
-        return (event.x - left) / (right - left), (event.y - top) / (bottom - top)
+    def _normalized(
+        self, event: tk.Event, *, clamp: bool = False
+    ) -> tuple[float, float] | None:
+        return normalize_canvas_point(
+            event.x, event.y, self.image_bounds, clamp=clamp
+        )
 
     def _press(self, event: tk.Event) -> None:
         if self.session is None:
@@ -834,6 +894,8 @@ class MasterView:
         if point is None:
             return
         self.dragging = True
+        self.last_move_at = event.time
+        self.last_touch_point = point
         self.owner.route_touch(self.session, 1, *point, from_master=True)
 
     def _key_press(self, event: tk.Event) -> str | None:
@@ -853,18 +915,23 @@ class MasterView:
     def _move(self, event: tk.Event) -> None:
         if not self.dragging or self.session is None:
             return
-        if event.time - self.last_move_at < 35:
-            return
-        self.last_move_at = event.time
-        point = self._normalized(event)
+        if not self.owner.touch_manager.enabled:
+            if event.time - self.last_move_at < TOUCH_MOVE_INTERVAL_MS:
+                return
+            self.last_move_at = event.time
+        point = self._normalized(event, clamp=self.owner.touch_manager.enabled)
         if point is not None:
+            self.last_touch_point = point
             self.owner.route_touch(self.session, 2, *point, from_master=True)
 
     def _release(self, event: tk.Event) -> None:
         if not self.dragging or self.session is None:
             return
         self.dragging = False
-        point = self._normalized(event)
+        point = self._normalized(event, clamp=self.owner.touch_manager.enabled)
+        if point is None:
+            point = self.last_touch_point
+        self.last_touch_point = None
         if point is not None:
             self.owner.route_touch(self.session, 0, *point, from_master=True)
         self.owner.activate_ime(
@@ -884,6 +951,7 @@ class XinglanApp:
         stability_minutes: float = 0.0,
     ) -> None:
         self.root = root
+        self.touch_manager = IoscpyTouchManager(PROJECT_DIR)
         self.max_devices = max_devices
         self.max_groups = max(1, (max_devices + GROUP_SIZE - 1) // GROUP_SIZE)
         self.decoder_backend = decoder_backend
@@ -910,10 +978,20 @@ class XinglanApp:
         self.sync_enabled = tk.BooleanVar(value=False)
         self.summary = tk.StringVar(value="准备扫描USB手机")
         self.health = tk.StringVar(value="帧率 0 · 内存 0 MB · 重连 0")
+        self.device_counts = tk.StringVar(value="Windows检测中…")
         self.load_sampler = ProcessLoadSampler()
         self.health_tick = 0
         self._scan_in_progress = False
+        self._usb_repair_in_progress = False
+        self._usb_count_in_progress = False
+        self._usb_count_after_id: str | None = None
+        self.windows_device_count: int | None = None
+        self.usbmux_device_count = 0
         self._closing = False
+        self.music_player = WindowsMusicPlayer(MUSIC_TRACKS)
+        self.music_track_index = 0
+        self.music_playing = False
+        self._music_after_id: str | None = None
         root.title("星澜")
         try:
             root.iconbitmap(default=str(PROJECT_DIR / "assets" / "xinglan.ico"))
@@ -976,6 +1054,24 @@ class XinglanApp:
             anchor="w", font=("Microsoft YaHei UI", 8),
         ).pack(fill="x")
 
+        # 原来的运行参数移到 Logo 左侧空位，不再挤占右侧设备数量区域。
+        runtime_status_block = tk.Frame(toolbar, bg="#1d2939")
+        runtime_status_block.place(
+            x=STATUS_BLOCK_WIDTH - 25,
+            y=1,
+            width=LEFT_RUNTIME_STATUS_WIDTH,
+            height=38,
+            anchor="nw",
+        )
+        tk.Label(
+            runtime_status_block,
+            textvariable=self.health,
+            bg="#1d2939",
+            fg="#d0d5dd",
+            anchor="sw",
+            font=("Microsoft YaHei UI", 8),
+        ).pack(fill="both", expand=True)
+
         # 四个顶部按钮与右侧主控栏共用同一条左右边界。
         # 这样“全部开屏”的左边缘会和下方“全选”严格对齐。
         top_actions = tk.Frame(toolbar, bg="#1d2939")
@@ -991,30 +1087,33 @@ class XinglanApp:
         for column in range(4):
             top_actions.grid_columnconfigure(column, weight=1, uniform="top-actions")
 
-        # 状态文字独立放在按钮左侧，避免再把按钮挤窄。
+        # 右侧只显示 Windows 与投屏通道数量，便于直接判断是否需要修复。
         status_block = tk.Frame(toolbar, bg="#1d2939")
         status_block.place(
             relx=1,
-            x=-(RIGHT_PANEL_WIDTH + 20),
-            y=1,
+            # 与下方05号卡片整体最右边框对齐；7px是卡片墙与主控栏间距。
+            x=-(RIGHT_PANEL_WIDTH + 7),
+            y=5,
             width=STATUS_BLOCK_WIDTH,
-            height=38,
+            height=34,
             anchor="ne",
         )
-        tk.Label(
-            status_block, textvariable=self.summary, bg="#1d2939", fg="#d0d5dd",
-            anchor="e", font=("Microsoft YaHei UI", 8),
-        ).pack(fill="x")
-        tk.Label(
-            status_block, textvariable=self.health, bg="#1d2939", fg="#d0d5dd",
-            anchor="e", font=("Microsoft YaHei UI", 8),
-        ).pack(fill="x")
+        self.device_counts_label = tk.Label(
+            status_block,
+            textvariable=self.device_counts,
+            bg="#1d2939",
+            fg="#d0d5dd",
+            anchor="se",
+            justify="right",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.device_counts_label.pack(fill="both", expand=True)
 
         for column, (text, command) in enumerate(
             (
+                ("修复端口", self.repair_usb_devices),
                 ("全部开屏", self.wake_all_devices),
                 ("全部熄屏", self.sleep_all_devices),
-                ("刷新设备", self.scan_devices),
                 ("分组设置", self.open_group_settings),
             )
         ):
@@ -1022,22 +1121,25 @@ class XinglanApp:
                 top_actions, text=text, command=command,
                 bg="#2e90fa", fg="white", activebackground="#1570ef",
                 activeforeground="white", relief="flat", borderwidth=0,
-                font=("Microsoft YaHei UI", 9, "bold"),
+                font=MAIN_BUTTON_FONT,
             ).grid(
                 row=0,
                 column=column,
                 sticky="nsew",
-                padx=(0 if column == 0 else 2, 0),
+                padx=1,
             )
 
         self.shell = tk.Frame(root, bg="#0b1220")
         self.shell.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        # 固定橙色外框恢复旧版尺寸。360px 总宽度扣除两侧各 2px
+        # 边框后，内部正好保留 356px 给主控画面，不再由粗流光框挤压画面。
         self.right_panel = tk.Frame(
             self.shell,
             width=RIGHT_PANEL_WIDTH,
             bg="#101828",
-            highlightthickness=2,
-            highlightbackground="#d58b00",
+            highlightthickness=MASTER_BORDER_THICKNESS,
+            highlightbackground=MASTER_BORDER_COLOR,
+            highlightcolor=MASTER_BORDER_COLOR,
         )
         self.right_panel.pack(side="right", fill="y", padx=(7, 0))
         self.right_panel.pack_propagate(False)
@@ -1056,6 +1158,7 @@ class XinglanApp:
         tk.Button(
             self.master_toolbar, text="全选", command=self.select_all_devices,
             bg="#2e90fa", fg="white", relief="flat", padx=8,
+            font=MAIN_BUTTON_FONT,
         ).pack(side="left", fill="y", padx=(5, 3), pady=3)
         self.sync_icons = {
             False: make_checkbox_icon(self.master_toolbar, 20, False),
@@ -1072,12 +1175,13 @@ class XinglanApp:
             activebackground="#1570ef",
             activeforeground="white",
             relief="flat",
-            font=("Microsoft YaHei UI", 12, "bold"),
+            font=MAIN_BUTTON_FONT,
         )
         self.sync_button.pack(side="left", fill="both", expand=True, padx=2, pady=3)
         tk.Button(
             self.master_toolbar, text="全反", command=self.clear_device_selection,
             bg="#2e90fa", fg="white", relief="flat", padx=8,
+            font=MAIN_BUTTON_FONT,
         ).pack(side="right", fill="y", padx=(3, 5), pady=3)
         self.master_view = MasterView(self, self.right_panel)
         self.master_view.frame.grid(row=1, column=0, sticky="nsew")
@@ -1098,6 +1202,7 @@ class XinglanApp:
         root.after(DISPLAY_INTERVAL_MS, self.refresh_tiles)
         root.after(1000, self.refresh_health)
         root.after(2000, self.periodic_scan)
+        root.after(200, self.refresh_windows_device_count)
 
     def _build_right_controls(self) -> None:
         """Build the right-side controls in the same order as the StarLan web UI."""
@@ -1123,12 +1228,18 @@ class XinglanApp:
         group_row = tk.Frame(self.controls, bg="#101828")
         group_row.grid(row=0, column=0, sticky="nsew", padx=2, pady=(2, 1))
         self.group_var = tk.StringVar(value="第1组")
-        self.group_combo = tk.Menubutton(
+        group_selector_slot = tk.Frame(
             group_row,
+            bg="#101828",
+            width=GROUP_SELECTOR_WIDTH,
+        )
+        group_selector_slot.pack(side="left", fill="y", padx=(0, 2))
+        group_selector_slot.pack_propagate(False)
+        self.group_combo = tk.Button(
+            group_selector_slot,
             textvariable=self.group_var,
-            # 与原生菜单展开后的实际宽度一致，保证上下左右边缘对齐。
-            width=8,
-            anchor="w",
+            command=self._toggle_group_popup,
+            anchor="center",
             bg="#f2f4f7",
             fg="#101828",
             activebackground="#f2f4f7",
@@ -1136,31 +1247,23 @@ class XinglanApp:
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
-            padx=7,
+            padx=0,
             takefocus=False,
-            font=("Microsoft YaHei UI", 10),
+            font=MAIN_BUTTON_FONT,
         )
-        self.group_menu = tk.Menu(
-            self.group_combo,
-            tearoff=False,
-            bg="#f2f4f7",
-            fg="#101828",
-            activebackground="#2e90fa",
-            activeforeground="white",
-            relief="flat",
-            borderwidth=1,
-            font=("Microsoft YaHei UI", 10),
-        )
-        self.group_combo.configure(menu=self.group_menu)
-        self.group_combo.pack(side="left", fill="y", padx=(0, 2))
-        self._set_group_menu_values(["第1组"])
+        self.group_values: list[str] = []
+        self.group_popup: tk.Toplevel | None = None
+        self.group_combo.pack(fill="both", expand=True)
+        # 程序刚打开时就完整显示全部分组，不能等设备扫描或打开分组设置后
+        # 才补齐菜单。默认 60 台对应第1组至第6组。
+        self._refresh_group_selector()
         self.group_button = tk.Button(
             group_row, text="连接本组", command=self.toggle_current_group,
             bg="#12b76a", fg="white",
             activebackground="#12b76a", activeforeground="white",
             relief="flat", borderwidth=0, highlightthickness=0,
             takefocus=False,
-            font=("Microsoft YaHei UI", 10, "bold"),
+            font=MAIN_BUTTON_FONT,
         )
         self.group_button.pack(side="left", fill="both", expand=True)
 
@@ -1175,7 +1278,7 @@ class XinglanApp:
             tk.Button(
                 shortcut_row, text=text, command=command,
                 bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
-                font=("Microsoft YaHei UI", 10),
+                font=MAIN_BUTTON_FONT,
             ).pack(
                 side="left",
                 fill="both",
@@ -1184,11 +1287,33 @@ class XinglanApp:
             )
 
         file_row = fixed_row(self.controls, 2)
+        music_button_slot = tk.Frame(
+            file_row,
+            bg="#101828",
+            width=GROUP_SELECTOR_WIDTH,
+        )
+        music_button_slot.pack(side="left", fill="y", padx=(0, 2))
+        music_button_slot.pack_propagate(False)
+        self.music_button = tk.Button(
+            music_button_slot,
+            text="音乐",
+            command=self.toggle_music,
+            bg="#2e90fa",
+            fg="white",
+            activebackground="#2e90fa",
+            activeforeground="white",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            takefocus=False,
+            font=MAIN_BUTTON_FONT,
+        )
+        self.music_button.pack(fill="both", expand=True)
         tk.Button(
             file_row, text="文件传输", command=self.open_file_transfer,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
-            font=("Microsoft YaHei UI", 10),
-        ).pack(fill="both", expand=True)
+            font=MAIN_BUTTON_FONT,
+        ).pack(side="left", fill="both", expand=True)
 
         mode_row = tk.Frame(self.controls, bg="#101828")
         mode_row.grid(row=3, column=0, sticky="nsew", padx=2, pady=(1, 2))
@@ -1196,13 +1321,13 @@ class XinglanApp:
             mode_row, text="全部投屏",
             command=self.start_current_group,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
-            font=("Microsoft YaHei UI", 10),
+            font=MAIN_BUTTON_FONT,
         ).pack(side="left", fill="both", expand=True, padx=(0, 1))
         tk.Button(
             mode_row, text="全部停屏",
             command=self.stop_current_group,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
-            font=("Microsoft YaHei UI", 10),
+            font=MAIN_BUTTON_FONT,
         ).pack(side="left", fill="both", expand=True, padx=(1, 0))
 
     def _announce(self, text: str) -> None:
@@ -1338,11 +1463,163 @@ class XinglanApp:
         self.group_var.set(values[current])
 
     def _set_group_menu_values(self, values: list[str]) -> None:
-        self.group_menu.delete(0, "end")
-        for value in values:
-            self.group_menu.add_command(
-                label=value,
-                command=lambda selected=value: self._select_group(selected),
+        self.group_values = list(values)
+        self._hide_group_popup()
+
+    def _toggle_group_popup(self) -> None:
+        popup = self.group_popup
+        if popup is not None:
+            try:
+                if popup.winfo_exists() and popup.winfo_viewable():
+                    self._hide_group_popup()
+                    return
+            except tk.TclError:
+                pass
+        self._show_group_popup()
+
+    def _show_group_popup(self) -> None:
+        if not self.group_values:
+            return
+        self._hide_group_popup()
+        self.root.update_idletasks()
+        width = max(1, self.group_combo.winfo_width())
+        item_height = 27
+        height = item_height * len(self.group_values) + 2
+        x = self.group_combo.winfo_rootx()
+        y = self.group_combo.winfo_rooty() + self.group_combo.winfo_height()
+        screen_height = self.root.winfo_screenheight()
+        if y + height > screen_height:
+            y = max(0, self.group_combo.winfo_rooty() - height)
+
+        popup = tk.Toplevel(self.root)
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.transient(self.root)
+        popup.configure(bg="#98a2b3")
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        self.group_popup = popup
+
+        for index, value in enumerate(self.group_values):
+            button = tk.Button(
+                popup,
+                text=value,
+                command=lambda selected=value: self._choose_group_from_popup(selected),
+                anchor="center",
+                bg="#f2f4f7",
+                fg="#101828",
+                activebackground="#2e90fa",
+                activeforeground="white",
+                relief="flat",
+                borderwidth=0,
+                highlightthickness=0,
+                takefocus=False,
+                font=MAIN_BUTTON_FONT,
+            )
+            button.place(
+                x=1,
+                y=1 + index * item_height,
+                width=max(1, width - 2),
+                height=item_height,
+            )
+        popup.bind("<Escape>", lambda _event: self._hide_group_popup())
+        popup.bind(
+            "<FocusOut>",
+            lambda _event: self.root.after(50, self._hide_group_popup_if_unfocused),
+        )
+        popup.deiconify()
+        popup.lift()
+        popup.focus_force()
+
+    def _hide_group_popup_if_unfocused(self) -> None:
+        popup = self.group_popup
+        if popup is None:
+            return
+        try:
+            focused = popup.focus_get()
+            if focused is not None and focused.winfo_toplevel() == popup:
+                return
+        except tk.TclError:
+            pass
+        self._hide_group_popup()
+
+    def _hide_group_popup(self) -> None:
+        popup = getattr(self, "group_popup", None)
+        self.group_popup = None
+        if popup is None:
+            return
+        try:
+            popup.destroy()
+        except tk.TclError:
+            pass
+
+    def _choose_group_from_popup(self, value: str) -> None:
+        self._hide_group_popup()
+        self._select_group(value)
+
+    def toggle_music(self) -> None:
+        if self.music_playing:
+            self._stop_music(reset=True)
+            self.summary.set("音乐已停止")
+            return
+        self.music_track_index = 0
+        self._play_music_track()
+
+    def _play_music_track(self) -> None:
+        if self._music_after_id is not None:
+            try:
+                self.root.after_cancel(self._music_after_id)
+            except tk.TclError:
+                pass
+            self._music_after_id = None
+        try:
+            self.music_player.play(self.music_track_index)
+        except (MusicPlaybackError, OSError) as exc:
+            self.music_playing = False
+            self.music_button.configure(
+                text="音乐", bg="#2e90fa", activebackground="#2e90fa"
+            )
+            self.summary.set(f"音乐播放失败：{exc}")
+            LOGGER.warning("music playback failed", exc_info=True)
+            return
+        self.music_playing = True
+        self.music_button.configure(
+            text="停止", bg="#b42318", activebackground="#b42318"
+        )
+        self.summary.set(
+            f"正在播放音乐 {self.music_track_index + 1}/{len(MUSIC_TRACKS)}"
+        )
+        self._music_after_id = self.root.after(500, self._poll_music_status)
+
+    def _poll_music_status(self) -> None:
+        self._music_after_id = None
+        if not self.music_playing or self._closing:
+            return
+        try:
+            mode = self.music_player.mode()
+        except MusicPlaybackError as exc:
+            self._stop_music(reset=True)
+            self.summary.set(f"音乐播放失败：{exc}")
+            return
+        if mode == "stopped":
+            self.music_track_index = (self.music_track_index + 1) % len(MUSIC_TRACKS)
+            self._play_music_track()
+            return
+        self._music_after_id = self.root.after(500, self._poll_music_status)
+
+    def _stop_music(self, reset: bool) -> None:
+        self.music_playing = False
+        if self._music_after_id is not None:
+            try:
+                self.root.after_cancel(self._music_after_id)
+            except tk.TclError:
+                pass
+            self._music_after_id = None
+        self.music_player.close()
+        if reset:
+            self.music_track_index = 0
+        if hasattr(self, "music_button"):
+            self.music_button.configure(
+                text="音乐", bg="#2e90fa", activebackground="#2e90fa"
             )
 
     def _select_group(self, value: str) -> None:
@@ -1586,6 +1863,7 @@ class XinglanApp:
             old_session = self.sessions.get(udid)
             if old_session is not None:
                 old_session.stop()
+                self.touch_manager.stop(udid)
                 # 会话线程不可复用；保留USB设备卡片，但换成全新的待机会话。
                 self.sessions[udid] = DeviceSession(
                     udid, decoder_preference=self.decoder_backend
@@ -1615,6 +1893,7 @@ class XinglanApp:
         self._stop_udids([item for item in self.active_udids if item not in current_group])
         session = self.sessions[udid]
         session.start()
+        self.touch_manager.start(udid)
         self.active_udids.add(udid)
         self.master_udid = udid
         LOGGER.info("manual projection started: %s", udid)
@@ -1641,6 +1920,7 @@ class XinglanApp:
             if udid in self.active_udids:
                 continue
             self.sessions[udid].start()
+            self.touch_manager.start(udid)
             self.active_udids.add(udid)
             LOGGER.info("manual projection started: %s", udid)
             started += 1
@@ -1649,6 +1929,7 @@ class XinglanApp:
         self.summary.set(
             f"{self.group_var.get()}已手动投屏 {len(targets)} 台，本次新连接 {started} 台"
         )
+        self.refresh_windows_device_count(schedule_next=False)
 
     def stop_current_group(self) -> None:
         stopped = self._stop_udids(self._current_group_udids())
@@ -1965,6 +2246,64 @@ class XinglanApp:
             daemon=True,
         ).start()
 
+    def repair_usb_devices(self) -> None:
+        """Manually recover only the external hub branches missing from usbmux."""
+        if self._closing or self._usb_repair_in_progress:
+            return
+        self._usb_repair_in_progress = True
+        self.summary.set("正在检查Windows与投屏USB通道…")
+
+        def set_progress(text: str) -> None:
+            try:
+                self.root.after(0, lambda value=text: self.summary.set(value))
+            except tk.TclError:
+                pass
+
+        def worker() -> None:
+            try:
+                result: tuple[UsbRepairResult | None, str | None] = (
+                    repair_usb(PROJECT_DIR, progress=set_progress),
+                    None,
+                )
+            except Exception as exc:
+                LOGGER.exception("USB branch repair failed")
+                result = (None, str(exc))
+            try:
+                self.root.after(0, lambda value=result: self._finish_usb_repair(value))
+            except tk.TclError:
+                pass
+
+        threading.Thread(
+            target=worker,
+            name="xinglan-usb-repair",
+            daemon=True,
+        ).start()
+
+    def _finish_usb_repair(
+        self,
+        result: tuple[UsbRepairResult | None, str | None],
+    ) -> None:
+        self._usb_repair_in_progress = False
+        if self._closing:
+            return
+        repair_result, error = result
+        if error is not None or repair_result is None:
+            self.summary.set(f"USB修复失败：{error or '未知错误'}")
+            return
+        if repair_result.cycled_branches == 0:
+            self.summary.set(
+                f"USB通道正常：Windows与投屏均识别 {repair_result.after_count} 台"
+            )
+        else:
+            self.summary.set(
+                f"USB修复完成：{repair_result.before_count}→{repair_result.after_count}/"
+                f"{repair_result.windows_count} 台，闪断 {repair_result.cycled_branches} 个分支"
+            )
+        self.windows_device_count = repair_result.windows_count
+        self.usbmux_device_count = repair_result.after_count
+        self._update_device_counts_text()
+        self.scan_devices()
+
     def _finish_device_scan(
         self,
         result: tuple[list[str] | None, str | None],
@@ -1981,6 +2320,8 @@ class XinglanApp:
 
     def _apply_device_scan(self, udids: list[str]) -> None:
         current = set(udids)
+        self.usbmux_device_count = len(current)
+        self._update_device_counts_text()
         # 新手机只进入“未设置”列表，绝不自动占用分组位置。
         changed = False
         for udid in list(self.sessions):
@@ -2021,8 +2362,92 @@ class XinglanApp:
                 len(udids), len(stable_udids), retained, ",".join(missing_suffixes),
             )
         self.summary.set(
-            f"发现 {len(stable_udids)} 台USB手机 · 已投屏 {len(self.active_udids)} 台 · 默认不自动投屏"
+            f"发现 {len(stable_udids)} 台USB手机 · 默认不自动投屏"
         )
+        self._update_device_counts_text()
+
+    def _update_device_counts_text(self) -> None:
+        windows_text = "检测中" if self.windows_device_count is None else str(self.windows_device_count)
+        missing = (
+            max(0, self.windows_device_count - self.usbmux_device_count)
+            if self.windows_device_count is not None
+            else 0
+        )
+        self.device_counts.set(
+            f"Windows {windows_text}台 · 投屏识别 {self.usbmux_device_count}台"
+            f" · 掉线 {missing}台"
+        )
+        color = "#f97066" if missing > 0 else "#d0d5dd"
+        self.device_counts_label.configure(fg=color)
+
+    def refresh_windows_device_count(self, *, schedule_next: bool = True) -> None:
+        """Refresh Windows PnP count without blocking rendering or overlapping runs."""
+        if self._closing:
+            return
+        if schedule_next and self._usb_count_after_id is not None:
+            try:
+                self.root.after_cancel(self._usb_count_after_id)
+            except tk.TclError:
+                pass
+            self._usb_count_after_id = None
+        if self._usb_repair_in_progress:
+            if schedule_next:
+                self._usb_count_after_id = self.root.after(
+                    WINDOWS_USB_REFRESH_MS,
+                    self.refresh_windows_device_count,
+                )
+            return
+        if self._usb_count_in_progress:
+            if schedule_next:
+                self._usb_count_after_id = self.root.after(
+                    WINDOWS_USB_REFRESH_MS,
+                    self.refresh_windows_device_count,
+                )
+            return
+        self._usb_count_in_progress = True
+
+        def worker() -> None:
+            try:
+                result: tuple[int | None, str | None] = (
+                    discover_windows_iphone_count(),
+                    None,
+                )
+            except Exception as exc:
+                result = (None, str(exc))
+            try:
+                self.root.after(
+                    0,
+                    lambda value=result, repeat=schedule_next:
+                        self._finish_windows_device_count(value, repeat),
+                )
+            except tk.TclError:
+                pass
+
+        threading.Thread(
+            target=worker,
+            name="xinglan-windows-usb-count",
+            daemon=True,
+        ).start()
+
+    def _finish_windows_device_count(
+        self,
+        result: tuple[int | None, str | None],
+        schedule_next: bool,
+    ) -> None:
+        self._usb_count_in_progress = False
+        if self._closing:
+            return
+        count, error = result
+        if error is None and count is not None:
+            self.windows_device_count = count
+            self._update_device_counts_text()
+        else:
+            LOGGER.warning("Windows USB count failed: %s", error or "unknown error")
+        if schedule_next:
+            self._usb_count_after_id = self.root.after(
+                WINDOWS_USB_REFRESH_MS,
+                self.refresh_windows_device_count,
+            )
 
     def _rebuild_tiles(self) -> None:
         ordered = self._current_group_udids()
@@ -2101,7 +2526,14 @@ class XinglanApp:
             )
         else:
             targets = [source]
-        accepted = sum(1 for session in targets if session.send_touch(kind, x, y))
+        if self.touch_manager.enabled:
+            accepted = sum(
+                1
+                for session in targets
+                if self.touch_manager.send_touch(session.udid, kind, x, y)
+            )
+        else:
+            accepted = sum(1 for session in targets if session.send_touch(kind, x, y))
         # 鼠标按下、移动和松开都是高频事件。正常发送时不改Tk状态文字，
         # 避免右侧分组下拉框和按钮跟随每次操作反复重绘、闪动。
         if accepted == 0 and kind in (0, 1):
@@ -2297,6 +2729,15 @@ class XinglanApp:
 
     def close(self) -> None:
         self._closing = True
+        self.touch_manager.close()
+        self._hide_group_popup()
+        self._stop_music(reset=True)
+        if self._usb_count_after_id is not None:
+            try:
+                self.root.after_cancel(self._usb_count_after_id)
+            except tk.TclError:
+                pass
+            self._usb_count_after_id = None
         self.action_hub.close()
         self.ime_worker.close()
         if (

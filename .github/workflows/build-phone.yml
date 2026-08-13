@@ -77,7 +77,11 @@ jobs:
             done
             dpkg-deb --fsys-tarfile "$package" | tar -tf - > "$verify_dir/files.txt"
             grep -q 'XLStream.app/bin/xlstreamd' "$verify_dir/files.txt"
+            grep -q 'XLStream.app/bin/xltouchd' "$verify_dir/files.txt"
             grep -q 'XLSystemActions.dylib' "$verify_dir/files.txt"
+            grep -q 'XLTouchActions.dylib' "$verify_dir/files.txt"
+            grep -q 'com.jibeib.xltouchd.plist' "$verify_dir/files.txt"
+            grep -q 'XLStream.app/ioscpy-LICENSE.txt' "$verify_dir/files.txt"
           done
           test "$count" -eq 1
 
