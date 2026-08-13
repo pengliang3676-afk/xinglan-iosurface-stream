@@ -2,9 +2,105 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
+#include <arpa/inet.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <spawn.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 #import "StreamClient.h"
 #import "InputInjector.h"
 #import "KeyboardSuppression.h"
+#import "Protocol.h"
+
+extern char **environ;
+
+// RootHide does not load a newly-installed LaunchDaemon when the user only
+// restarts SpringBoard.  The hook, however, is guaranteed to be loaded by that
+// restart.  Keep the small control daemon alive from here as well.  If launchd
+// already owns a healthy copy, the loopback readiness check makes this a no-op.
+// This deliberately avoids package maintainer scripts, which previously left
+// dpkg/Sileo in an inconsistent state when an install was interrupted.
+static BOOL IOSPYDaemonPortReady(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return NO;
+
+    struct timeval timeout = {0, 150 * 1000};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(IOSPY_DEFAULT_PORT);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    BOOL ready = connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0;
+    close(fd);
+    return ready;
+}
+
+static NSString *IOSPYBundledDaemonPath(void) {
+    Dl_info imageInfo = {};
+    if (dladdr((const void *)&IOSPYBundledDaemonPath, &imageInfo) == 0 ||
+        !imageInfo.dli_fname) {
+        return @"/Applications/XLStream.app/bin/xltouchd";
+    }
+
+    NSString *imagePath = [NSString stringWithUTF8String:imageInfo.dli_fname];
+    NSRange library = [imagePath rangeOfString:@"/Library/MobileSubstrate/"
+                                       options:NSBackwardsSearch];
+    if (library.location == NSNotFound) {
+        return @"/Applications/XLStream.app/bin/xltouchd";
+    }
+    NSString *prefix = [imagePath substringToIndex:library.location];
+    return [prefix stringByAppendingPathComponent:@"Applications/XLStream.app/bin/xltouchd"];
+}
+
+static void IOSPYStartDaemonSupervisor(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *daemonPath = IOSPYBundledDaemonPath();
+        const char *daemon = daemonPath.fileSystemRepresentation;
+        NSLog(@"[ioscpyhook] touch daemon supervisor path=%@", daemonPath);
+
+        // A copy loaded by launchd owns the service across userspace restarts.
+        // Do this probe only once: repeated probe sockets would accumulate in
+        // the listen backlog while the real Windows client holds its session.
+        if (IOSPYDaemonPortReady()) {
+            NSLog(@"[ioscpyhook] launchd touch daemon already ready");
+            return;
+        }
+
+        while (1) {
+            @autoreleasepool {
+                if (![[NSFileManager defaultManager] isExecutableFileAtPath:daemonPath]) {
+                    NSLog(@"[ioscpyhook] touch daemon missing: %@", daemonPath);
+                    sleep(3);
+                    continue;
+                }
+
+                pid_t child = -1;
+                char *const arguments[] = {const_cast<char *>(daemon), nullptr};
+                int result = posix_spawn(&child, daemon, nullptr, nullptr, arguments, environ);
+                if (result != 0) {
+                    NSLog(@"[ioscpyhook] touch daemon spawn failed: %d", result);
+                    sleep(2);
+                    continue;
+                }
+
+                NSLog(@"[ioscpyhook] touch daemon started pid=%d", child);
+                int status = 0;
+                while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+                }
+                NSLog(@"[ioscpyhook] touch daemon exited status=%d", status);
+                sleep(1);
+            }
+        }
+    });
+}
 
 // Injected into SpringBoard. Announces itself on load and starts the stream
 // client, which connects to the daemon and captures the screen on demand.
@@ -72,6 +168,7 @@ static BOOL gSuppressPasteAlert = NO;
 
         IOSPYOrientationStart();
         IOSPYKeyboardSuppressionInit();
+        IOSPYStartDaemonSupervisor();
         [[IOSPYStreamClient shared] start];
     }
 }

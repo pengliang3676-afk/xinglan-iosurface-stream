@@ -89,6 +89,14 @@ class PhonePackageSafetyTests(unittest.TestCase):
             launch["ProgramArguments"][0],
         )
 
+        hook = (
+            PHONE / "vendor" / "ioscpy" / "tweak" / "Tweak.xm"
+        ).read_text(encoding="utf-8")
+        self.assertIn("IOSPYStartDaemonSupervisor", hook)
+        self.assertIn("IOSPYDaemonPortReady", hook)
+        self.assertIn("posix_spawn", hook)
+        self.assertIn("Applications/XLStream.app/bin/xltouchd", hook)
+
 
 if __name__ == "__main__":
     unittest.main()
