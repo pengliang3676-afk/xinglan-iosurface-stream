@@ -1972,12 +1972,12 @@ class XinglanApp:
         transferring = tk.BooleanVar(value=False)
 
         def current_targets() -> list[str]:
-            positioned = self.group_store.positioned_devices(
-                self.sessions, group_number
-            )
-            return [
-                udid for _, udid in positioned if udid in self.active_udids
-            ]
+            # Restore the established control-target rule used by the old
+            # transfer dialog: without sync, transfer only to the current
+            # master; with sync, transfer only to checked active phones in
+            # the current group.  "Select all" therefore means all 10 only
+            # after synchronized control has been enabled.
+            return self._selected_control_udids()
 
         def refresh_target_text() -> None:
             targets = current_targets()
