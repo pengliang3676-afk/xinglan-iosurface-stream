@@ -9,12 +9,13 @@
 
 手机安装
 --------
-1. 普通 Dopamine 越狱只安装“2_TrollVNC静默_普通越狱版.deb”。
-2. Dopamine RootHide 越狱只安装“2_TrollVNC静默_RootHide版.deb”。
-3. 两个版本绝对不要同时安装。
-4. 安装或更新后执行一次 Respring（重启用户空间）。
-5. TrollVNC 必须启用，端口保持 5901，不能开启 View Only。
-6. 当前客户端使用 TrollVNC 的无密码连接；Full Password 和 View-only Password 都要留空。
+1. “手机端_投屏插件/星澜TP0.8.3.deb”是当前 RootHide 正式投屏包，负责 H.264、系统控制、键盘和文件传输；手机已安装同版时不用重装。
+2. 普通 Dopamine 越狱的 TrollVNC 只安装“2_TrollVNC静默_普通越狱版.deb”。
+3. Dopamine RootHide 越狱的 TrollVNC 只安装“2_TrollVNC静默_RootHide版.deb”。
+4. 两个 TrollVNC 版本绝对不要同时安装。
+5. 安装或更新后执行一次 Respring（重启用户空间）。
+6. TrollVNC 必须启用，端口保持 5901，不能开启 View Only。
+7. 当前客户端使用 TrollVNC 的无密码连接；Full Password 和 View-only Password 都要留空。
 
 电脑使用
 --------
