@@ -27,9 +27,11 @@ jobs:
       - name: Install build dependencies
         env:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           brew install ldid xz dpkg
           git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
+          "$HOME/theos/bin/install-sdk" iPhoneOS16.5
 
       - name: Build XLStream RootHide package
         env:
