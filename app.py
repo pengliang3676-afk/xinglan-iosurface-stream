@@ -24,7 +24,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk  # noqa: E402
 
 from xinglan.device_discovery import discover_usb_udids_stable  # noqa: E402
 from xinglan.device_actions import (  # noqa: E402
-    PersistentDeviceActionHub,
+    OnDemandDeviceActionHub,
     identify_physical_device,
 )
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
@@ -953,9 +953,9 @@ class XinglanApp:
         self._active_touch_routes: dict[
             tuple[str, bool], ActiveTouchRoute
         ] = {}
-        # 提前为每台在线手机保持一条轻量级 USB 控制通道。顶部开屏/熄屏
-        # 点击时只广播旧版原始指令，不再临时并发建立 60 条连接。
-        self.action_hub = PersistentDeviceActionHub()
+        # 只记录在线设备，不保持 6000/6203 连接。顶部开屏/熄屏点击时
+        # 临时分批连接，命令结束后立即释放 USB 服务端口。
+        self.action_hub = OnDemandDeviceActionHub()
         self.active_udids: set[str] = set()
         self.selected_udids: set[str] = set()
         self.tiles: dict[str, DeviceTile] = {}
@@ -1357,16 +1357,15 @@ class XinglanApp:
             failed = len(result) - succeeded
             self.summary.set(f"{label}：成功 {succeeded} 台，失败 {failed} 台")
 
-        # 仍然只发送一次旧版原始 ``14\r\n`` / ``15\r\n``；区别只是
-        # USB 通道已在扫描设备时准备好，按钮点击不再承担建连工作。
-        # Reinstalled RootHide phones may expose the acknowledged XLStream
-        # control service on 6203 without starting the legacy SpringBoard
-        # compatibility listener on 6000.  Keep the original instant legacy
-        # broadcast and run the acknowledged 6203 fallback in the same turn.
-        # WAKE also includes HOME so fallback phones enter SpringBoard.
+        # Open acknowledged XLStream control port 6203 only while this button
+        # command is running. Port 6000 is an on-demand compatibility fallback
+        # and is closed immediately after the write, so discovered phones no
+        # longer hold permanent USB service connections.
         future = self.action_hub.broadcast_verified(udids, action)
 
         def finished(done_future) -> None:
+            if done_future.cancelled():
+                return
             try:
                 result = done_future.result()
             except Exception as exc:  # pragma: no cover - defensive UI boundary

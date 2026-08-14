@@ -5,7 +5,6 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future
-from dataclasses import dataclass
 from typing import Any
 
 from .bootstrap import configure_dependencies
@@ -42,18 +41,7 @@ LEGACY_COMMAND_BYTES = {
     "wake": b"14\r\n",
     "sleep": b"15\r\n",
 }
-
-
-@dataclass
-class _QueuedAction:
-    action: str
-    result: asyncio.Future[bool]
-
-
-@dataclass
-class _PersistentChannel:
-    queue: asyncio.Queue[_QueuedAction]
-    ready: asyncio.Event
+ON_DEMAND_MAX_CONNECTIONS = 10
 
 
 async def _read_exact(connection: Any, count: int, timeout: float) -> bytes:
@@ -166,12 +154,10 @@ async def send_action_to_devices(
     udids: Iterable[str], action: str
 ) -> dict[str, bool]:
     ordered = list(dict.fromkeys(udids))
-    # The action is deliberately broadcast-like: all USB phones should
-    # receive the wake/lock command in the same moment.  A small semaphore
-    # made 60 phones run in five visible batches, which looked like one-by-one
-    # screen changes.  Keep only a light safety cap above the supported 60
-    # devices so usbmux can perform the handshakes concurrently.
-    semaphore = asyncio.Semaphore(64)
+    # Port 6203 is opened only while a command is being delivered.  Keep the
+    # usbmux handshake burst bounded so a 60-phone button press cannot create
+    # sixty Apple driver stacks at exactly the same instant.
+    semaphore = asyncio.Semaphore(ON_DEMAND_MAX_CONNECTIONS)
 
     async def send_one(udid: str) -> bool:
         async with semaphore:
@@ -194,7 +180,7 @@ async def send_action_sequence_to_devices(
 ) -> dict[str, bool]:
     ordered = list(dict.fromkeys(udids))
     sequence = list(actions)
-    semaphore = asyncio.Semaphore(64)
+    semaphore = asyncio.Semaphore(ON_DEMAND_MAX_CONNECTIONS)
 
     async def send_one(udid: str) -> bool:
         async with semaphore:
@@ -258,22 +244,22 @@ async def send_legacy_action_to_devices(
     action: str,
     should_continue: Callable[[], bool] | None = None,
 ) -> dict[str, bool]:
-    """Mirror Promise.all from the legacy browser backend for all USB phones."""
+    """Use port 6000 only for the duration of this one button command."""
     ordered = list(dict.fromkeys(udids))
-    if should_continue is None:
-        operations = (
-            send_legacy_device_action(udid, action) for udid in ordered
-        )
-    else:
-        operations = (
-            send_legacy_device_action(
+    semaphore = asyncio.Semaphore(ON_DEMAND_MAX_CONNECTIONS)
+
+    async def send_one(udid: str) -> bool:
+        async with semaphore:
+            return await send_legacy_device_action(
                 udid,
                 action,
                 should_continue=should_continue,
             )
-            for udid in ordered
-        )
-    results = await asyncio.gather(*operations, return_exceptions=True)
+
+    results = await asyncio.gather(
+        *(send_one(udid) for udid in ordered),
+        return_exceptions=True,
+    )
     return {
         udid: bool(result) if not isinstance(result, BaseException) else False
         for udid, result in zip(ordered, results)
@@ -296,28 +282,31 @@ async def send_reliable_wake_to_devices(
     the top button stays backwards compatible.
     """
     ordered = list(dict.fromkeys(udids))
-    # Start both wake paths in the same event-loop turn.  Do not wait before
-    # the verified path: that delay was visible on phones missed by port 6000.
+    # Current phones use the acknowledged 6203 channel.  Open the legacy 6000
+    # listener only for phones that did not accept 6203, then close it
+    # immediately.  This preserves old plug-in compatibility without sixty
+    # permanent USB service connections.
     if should_continue is None:
-        legacy_operation = send_legacy_action_to_devices(ordered, "wake")
-        completed_operation = send_action_sequence_to_devices(
+        completed_result = await send_action_sequence_to_devices(
             ordered,
             ["wake", "home"],
         )
     else:
-        legacy_operation = send_legacy_action_to_devices(
-            ordered,
-            "wake",
-            should_continue=should_continue,
-        )
-        completed_operation = send_action_sequence_to_devices(
+        completed_result = await send_action_sequence_to_devices(
             ordered,
             ["wake", "home"],
             should_continue=should_continue,
         )
-    legacy_task = asyncio.create_task(legacy_operation)
-    completed_result = await completed_operation
-    legacy_result = await legacy_task
+    fallback = [udid for udid in ordered if not completed_result.get(udid, False)]
+    legacy_result = (
+        await send_legacy_action_to_devices(
+            fallback,
+            "wake",
+            should_continue=should_continue,
+        )
+        if fallback
+        else {}
+    )
     return {
         udid: bool(completed_result.get(udid) or legacy_result.get(udid))
         for udid in ordered
@@ -328,52 +317,41 @@ async def send_reliable_sleep_to_devices(
     udids: Iterable[str],
     should_continue: Callable[[], bool] | None = None,
 ) -> dict[str, bool]:
-    """Lock every phone quickly and verify missed devices on the new channel.
-
-    Port 6000 preserves the legacy all-at-once behaviour.  The acknowledged
-    XLStream action runs in the same event-loop turn and repairs phones whose
-    legacy write was accepted by USB but not handled by the phone.
-    """
+    """Lock through acknowledged 6203, then use legacy 6000 only if needed."""
     ordered = list(dict.fromkeys(udids))
     if should_continue is None:
-        legacy_operation = send_legacy_action_to_devices(ordered, "sleep")
-        verified_operation = send_action_to_devices(ordered, "sleep")
+        verified_result = await send_action_to_devices(ordered, "sleep")
     else:
-        legacy_operation = send_legacy_action_to_devices(
-            ordered,
-            "sleep",
-            should_continue=should_continue,
-        )
-        verified_operation = send_action_sequence_to_devices(
+        verified_result = await send_action_sequence_to_devices(
             ordered,
             ["sleep"],
             should_continue=should_continue,
         )
-    legacy_task = asyncio.create_task(legacy_operation)
-    verified_result = await verified_operation
-    legacy_result = await legacy_task
+    fallback = [udid for udid in ordered if not verified_result.get(udid, False)]
+    legacy_result = (
+        await send_legacy_action_to_devices(
+            fallback,
+            "sleep",
+            should_continue=should_continue,
+        )
+        if fallback
+        else {}
+    )
     return {
         udid: bool(verified_result.get(udid) or legacy_result.get(udid))
         for udid in ordered
     }
 
 
-class PersistentDeviceActionHub:
-    """Keep one legacy port-6000 USB channel ready for every phone.
-
-    The top power buttons must not create sixty usbmux connections at click
-    time.  Connections are established in the background after discovery and
-    the exact legacy ``14``/``15`` packet is broadcast over the ready channels
-    in one event-loop turn.  There is deliberately no second command and no
-    post-action verification.
-    """
+class OnDemandDeviceActionHub:
+    """Run all-phone power commands without keeping USB service ports open."""
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_ready = threading.Event()
+        self._state_lock = threading.Lock()
         self._desired: set[str] = set()
-        self._channels: dict[str, _PersistentChannel] = {}
-        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._current_operation: Future[dict[str, bool]] | None = None
         self._closed = False
         self._thread = threading.Thread(
             target=self._thread_main,
@@ -399,199 +377,47 @@ class PersistentDeviceActionHub:
             loop.close()
 
     def update_devices(self, udids: Iterable[str]) -> None:
-        loop = self._loop
-        if self._closed or loop is None or not loop.is_running():
-            return
-        desired = set(dict.fromkeys(udids))
-        asyncio.run_coroutine_threadsafe(self._update_devices(desired), loop)
+        with self._state_lock:
+            self._desired = set(dict.fromkeys(udids))
 
-    async def _update_devices(self, desired: set[str]) -> None:
-        self._desired = desired
-        removed = set(self._tasks) - desired
-        for udid in removed:
-            task = self._tasks.pop(udid)
-            task.cancel()
-            self._channels.pop(udid, None)
-        for position, udid in enumerate(sorted(desired - set(self._tasks))):
-            channel = _PersistentChannel(asyncio.Queue(maxsize=8), asyncio.Event())
-            self._channels[udid] = channel
-            self._tasks[udid] = asyncio.create_task(
-                self._supervise_channel(udid, channel, position * 0.025)
-            )
-
-    async def _supervise_channel(
+    def _submit(
         self,
-        udid: str,
-        channel: _PersistentChannel,
-        initial_delay: float,
-    ) -> None:
-        if initial_delay > 0:
-            await asyncio.sleep(initial_delay)
-        delay = 0.15
-        pending: _QueuedAction | None = None
-        while udid in self._desired:
-            connection: Any | None = None
-            disconnected: asyncio.Task[bytes] | None = None
-            try:
-                connection = await asyncio.wait_for(
-                    ServiceConnection.create_using_usbmux(
-                        udid,
-                        LEGACY_CONTROL_PORT,
-                        connection_type="USB",
-                    ),
-                    timeout=3.0,
-                )
-                channel.ready.set()
-                delay = 0.15
-                disconnected = asyncio.create_task(connection.recv_any(1))
-                while udid in self._desired:
-                    queued = asyncio.create_task(channel.queue.get())
-                    done, _ = await asyncio.wait(
-                        (queued, disconnected),
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if disconnected in done:
-                        try:
-                            await disconnected
-                        except Exception:
-                            pass
-                        if queued in done:
-                            pending = queued.result()
-                        else:
-                            queued.cancel()
-                            await asyncio.gather(queued, return_exceptions=True)
-                        raise ConnectionError("legacy control channel closed")
-
-                    pending = queued.result()
-                    payload = LEGACY_COMMAND_BYTES.get(pending.action)
-                    if payload is None:
-                        if not pending.result.done():
-                            pending.result.set_result(False)
-                        pending = None
-                        continue
-                    await connection.sendall(payload)
-                    if not pending.result.done():
-                        pending.result.set_result(True)
-                    pending = None
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                channel.ready.clear()
-                if pending is not None and not pending.result.done():
-                    pending.result.set_result(False)
-                pending = None
-                await asyncio.sleep(delay)
-                delay = min(2.0, delay * 1.6)
-            finally:
-                channel.ready.clear()
-                if disconnected is not None and not disconnected.done():
-                    disconnected.cancel()
-                    await asyncio.gather(disconnected, return_exceptions=True)
-                if connection is not None:
-                    try:
-                        await connection.close()
-                    except Exception:
-                        pass
-
-    def broadcast(self, udids: Iterable[str], action: str) -> Future[dict[str, bool]]:
+        operation: Any,
+        ordered: list[str],
+    ) -> Future[dict[str, bool]]:
         loop = self._loop
-        ordered = list(dict.fromkeys(udids))
         if self._closed or loop is None or not loop.is_running():
+            if asyncio.iscoroutine(operation):
+                operation.close()
             failed: Future[dict[str, bool]] = Future()
             failed.set_result({udid: False for udid in ordered})
             return failed
-        return asyncio.run_coroutine_threadsafe(
-            self._broadcast(ordered, action),
-            loop,
-        )
+        with self._state_lock:
+            previous = self._current_operation
+            if previous is not None and not previous.done():
+                previous.cancel()
+            future = asyncio.run_coroutine_threadsafe(operation, loop)
+            self._current_operation = future
+        return future
+
+    def broadcast(self, udids: Iterable[str], action: str) -> Future[dict[str, bool]]:
+        ordered = list(dict.fromkeys(udids))
+        return self._submit(send_legacy_action_to_devices(ordered, action), ordered)
 
     def broadcast_verified(
         self,
         udids: Iterable[str],
         action: str,
     ) -> Future[dict[str, bool]]:
-        """Use legacy-ready channels and route missing listeners to port 6203.
-
-        This keeps the original one-command behaviour on healthy old plug-ins,
-        while freshly re-jailbroken RootHide phones whose port-6000 listener is
-        absent use the acknowledged 6203 service without receiving duplicates.
-        """
-        loop = self._loop
+        """Prefer acknowledged 6203 and use 6000 only as an on-demand fallback."""
         ordered = list(dict.fromkeys(udids))
-        if self._closed or loop is None or not loop.is_running():
-            failed: Future[dict[str, bool]] = Future()
-            failed.set_result({udid: False for udid in ordered})
-            return failed
-        return asyncio.run_coroutine_threadsafe(
-            self._broadcast_verified(ordered, action),
-            loop,
-        )
-
-    async def _broadcast_verified(
-        self,
-        udids: list[str],
-        action: str,
-    ) -> dict[str, bool]:
-        legacy_udids = [
-            udid
-            for udid in udids
-            if (channel := self._channels.get(udid)) is not None
-            and channel.ready.is_set()
-        ]
-        fallback_udids = [udid for udid in udids if udid not in set(legacy_udids)]
-        legacy_task = asyncio.create_task(self._broadcast(legacy_udids, action))
         if action == "wake":
-            # Port 6000 preserves the legacy instant wake.  Fresh RootHide
-            # installs may expose only 6203, so the acknowledged fallback must
-            # also return those phones to SpringBoard just like the old top
-            # button did.
-            verified_operation = send_action_sequence_to_devices(
-                fallback_udids,
-                ["wake", "home"],
-            )
+            operation = send_reliable_wake_to_devices(ordered)
+        elif action == "sleep":
+            operation = send_reliable_sleep_to_devices(ordered)
         else:
-            verified_operation = send_action_to_devices(fallback_udids, action)
-        verified_task = asyncio.create_task(verified_operation)
-        legacy_result, verified_result = await asyncio.gather(
-            legacy_task,
-            verified_task,
-        )
-        return {
-            udid: bool(legacy_result.get(udid) or verified_result.get(udid))
-            for udid in udids
-        }
-
-    async def _broadcast(self, udids: list[str], action: str) -> dict[str, bool]:
-        async def send_one(udid: str) -> bool:
-            channel = self._channels.get(udid)
-            if channel is None:
-                return False
-            try:
-                # A full 60-phone scan deliberately staggers initial USB
-                # setup over roughly 1.5 seconds.  If the user clicks during
-                # startup, wait for that one preparation pass instead of
-                # dropping the last phones or opening replacement sockets.
-                await asyncio.wait_for(channel.ready.wait(), timeout=3.0)
-            except asyncio.TimeoutError:
-                return False
-            result = asyncio.get_running_loop().create_future()
-            try:
-                channel.queue.put_nowait(_QueuedAction(action, result))
-            except asyncio.QueueFull:
-                return False
-            try:
-                return await asyncio.wait_for(result, timeout=3.0)
-            except asyncio.TimeoutError:
-                return False
-
-        results = await asyncio.gather(
-            *(send_one(udid) for udid in udids),
-            return_exceptions=True,
-        )
-        return {
-            udid: bool(result) if not isinstance(result, BaseException) else False
-            for udid, result in zip(udids, results)
-        }
+            operation = send_action_to_devices(ordered, action)
+        return self._submit(operation, ordered)
 
     def close(self) -> None:
         if self._closed:
@@ -600,22 +426,12 @@ class PersistentDeviceActionHub:
         loop = self._loop
         if loop is None or not loop.is_running():
             return
-
-        async def shutdown() -> None:
+        with self._state_lock:
             self._desired.clear()
-            tasks = list(self._tasks.values())
-            self._tasks.clear()
-            self._channels.clear()
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-        future = asyncio.run_coroutine_threadsafe(shutdown(), loop)
-        try:
-            future.result(timeout=2.0)
-        except Exception:
-            pass
+            current = self._current_operation
+            self._current_operation = None
+        if current is not None and not current.done():
+            current.cancel()
         loop.call_soon_threadsafe(loop.stop)
         self._thread.join(timeout=2.0)
 

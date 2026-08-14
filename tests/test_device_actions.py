@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import time
 import unittest
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from xinglan.control_protocol import (
@@ -21,7 +20,8 @@ from xinglan.device_actions import (
     ACTION_MAP,
     LEGACY_COMMAND_BYTES,
     LEGACY_CONTROL_PORT,
-    PersistentDeviceActionHub,
+    ON_DEMAND_MAX_CONNECTIONS,
+    OnDemandDeviceActionHub,
     identify_physical_device,
     send_action_to_devices,
     send_action_sequence_to_devices,
@@ -59,14 +59,6 @@ class FakeConnection:
 
     async def close(self) -> None:
         self.closed = True
-
-
-class PersistentFakeConnection(FakeConnection):
-    """A legacy socket that stays open until its supervisor is cancelled."""
-
-    async def recv_any(self, length: int) -> bytes:
-        await asyncio.Future()
-        return b""  # pragma: no cover - the future is cancelled during shutdown
 
 
 class DeviceActionTests(unittest.TestCase):
@@ -221,36 +213,42 @@ class DeviceActionTests(unittest.TestCase):
         self.assertEqual(result, {"a": True, "b": True, "c": True})
         self.assertEqual(sender.await_count, 3)
 
-    def test_persistent_hub_reuses_one_legacy_usb_connection(self) -> None:
-        connection = PersistentFakeConnection()
+    def test_device_inventory_does_not_open_any_usb_service(self) -> None:
+        create = AsyncMock()
+        with patch(
+            "xinglan.device_actions.ServiceConnection.create_using_usbmux",
+            new=create,
+        ):
+            hub = OnDemandDeviceActionHub()
+            try:
+                hub.update_devices(["device-01"])
+                time.sleep(0.1)
+            finally:
+                hub.close()
+
+        create.assert_not_awaited()
+
+    def test_on_demand_legacy_broadcast_closes_connection(self) -> None:
+        connection = FakeConnection()
         create = AsyncMock(return_value=connection)
         with patch(
             "xinglan.device_actions.ServiceConnection.create_using_usbmux",
             new=create,
         ):
-            hub = PersistentDeviceActionHub()
+            hub = OnDemandDeviceActionHub()
             try:
-                hub.update_devices(["device-01"])
-                deadline = time.monotonic() + 2.0
-                while create.await_count == 0 and time.monotonic() < deadline:
-                    time.sleep(0.01)
-
-                wake = hub.broadcast(["device-01"], "wake").result(timeout=3.0)
-                sleep = hub.broadcast(["device-01"], "sleep").result(timeout=3.0)
+                result = hub.broadcast(["device-01"], "sleep").result(timeout=3.0)
             finally:
                 hub.close()
 
-        self.assertEqual({"device-01": True}, wake)
-        self.assertEqual({"device-01": True}, sleep)
-        create.assert_awaited_once_with(
-            "device-01", 6000, connection_type="USB"
-        )
-        self.assertEqual([b"14\r\n", b"15\r\n"], connection.payloads)
+        self.assertEqual({"device-01": True}, result)
+        create.assert_awaited_once_with("device-01", 6000, connection_type="USB")
+        self.assertEqual([b"15\r\n"], connection.payloads)
         self.assertTrue(connection.closed)
 
     def test_reliable_wake_verifies_then_returns_every_phone_home(self) -> None:
-        legacy = AsyncMock(return_value={"a": True, "b": True, "c": False})
         completed = AsyncMock(return_value={"a": True, "b": True, "c": True})
+        legacy = AsyncMock()
         with (
             patch("xinglan.device_actions.send_legacy_action_to_devices", new=legacy),
             patch("xinglan.device_actions.send_action_sequence_to_devices", new=completed),
@@ -260,14 +258,14 @@ class DeviceActionTests(unittest.TestCase):
             )
 
         self.assertEqual(result, {"a": True, "b": True, "c": True})
-        legacy.assert_awaited_once_with(["a", "b", "c"], "wake")
+        legacy.assert_not_awaited()
         completed.assert_awaited_once_with(
             ["a", "b", "c"],
             ["wake", "home"],
         )
 
     def test_reliable_wake_keeps_legacy_compatibility(self) -> None:
-        legacy = AsyncMock(return_value={"old": True, "new": True})
+        legacy = AsyncMock(return_value={"old": True})
         completed = AsyncMock(return_value={"old": False, "new": True})
         with (
             patch("xinglan.device_actions.send_legacy_action_to_devices", new=legacy),
@@ -276,9 +274,14 @@ class DeviceActionTests(unittest.TestCase):
             result = asyncio.run(send_reliable_wake_to_devices(["old", "new"]))
 
         self.assertEqual(result, {"old": True, "new": True})
+        legacy.assert_awaited_once_with(
+            ["old"],
+            "wake",
+            should_continue=None,
+        )
 
-    def test_reliable_sleep_uses_legacy_speed_and_verified_fallback(self) -> None:
-        legacy = AsyncMock(return_value={"a": True, "b": False, "c": True})
+    def test_reliable_sleep_uses_6000_only_for_6203_failures(self) -> None:
+        legacy = AsyncMock(return_value={"c": True})
         verified = AsyncMock(return_value={"a": True, "b": True, "c": False})
         with (
             patch("xinglan.device_actions.send_legacy_action_to_devices", new=legacy),
@@ -289,78 +292,53 @@ class DeviceActionTests(unittest.TestCase):
             )
 
         self.assertEqual(result, {"a": True, "b": True, "c": True})
-        legacy.assert_awaited_once_with(["a", "b", "c"], "sleep")
+        legacy.assert_awaited_once_with(
+            ["c"],
+            "sleep",
+            should_continue=None,
+        )
         verified.assert_awaited_once_with(["a", "b", "c"], "sleep")
 
-    def test_persistent_hub_verified_broadcast_merges_both_control_paths(self) -> None:
-        hub = PersistentDeviceActionHub.__new__(PersistentDeviceActionHub)
-        legacy_ready = asyncio.Event()
-        legacy_ready.set()
-        hub._channels = {"legacy": SimpleNamespace(ready=legacy_ready)}
-        hub._broadcast = AsyncMock(
-            return_value={"legacy": True}
-        )
-        verified = AsyncMock(
-            return_value={"modern": True, "failed": False}
-        )
+    def test_on_demand_hub_routes_verified_wake_without_persistent_channels(self) -> None:
+        reliable = AsyncMock(return_value={"a": True, "b": True})
         with patch(
-            "xinglan.device_actions.send_action_to_devices",
-            new=verified,
+            "xinglan.device_actions.send_reliable_wake_to_devices",
+            new=reliable,
         ):
+            hub = OnDemandDeviceActionHub()
+            try:
+                hub.update_devices(["a", "b"])
+                result = hub.broadcast_verified(["a", "b", "a"], "wake").result(
+                    timeout=3.0
+                )
+            finally:
+                hub.close()
+
+        self.assertEqual({"a": True, "b": True}, result)
+        reliable.assert_awaited_once_with(["a", "b"])
+
+    def test_on_demand_connections_are_bounded(self) -> None:
+        active = 0
+        peak = 0
+
+        async def sender(udid: str, action: str) -> bool:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return True
+
+        with patch("xinglan.device_actions.send_device_action", new=sender):
             result = asyncio.run(
-                hub._broadcast_verified(
-                    ["legacy", "modern", "failed"],
+                send_action_to_devices(
+                    [f"device-{index:02d}" for index in range(25)],
                     "sleep",
                 )
             )
 
-        self.assertEqual(
-            {"legacy": True, "modern": True, "failed": False},
-            result,
-        )
-        hub._broadcast.assert_awaited_once_with(
-            ["legacy"],
-            "sleep",
-        )
-        verified.assert_awaited_once_with(
-            ["modern", "failed"],
-            "sleep",
-        )
-
-    def test_persistent_hub_verified_wake_returns_fallback_phones_home(self) -> None:
-        hub = PersistentDeviceActionHub.__new__(PersistentDeviceActionHub)
-        legacy_ready = asyncio.Event()
-        legacy_ready.set()
-        hub._channels = {"legacy": SimpleNamespace(ready=legacy_ready)}
-        hub._broadcast = AsyncMock(
-            return_value={"legacy": True}
-        )
-        completed = AsyncMock(
-            return_value={"modern": True, "failed": False}
-        )
-        with patch(
-            "xinglan.device_actions.send_action_sequence_to_devices",
-            new=completed,
-        ):
-            result = asyncio.run(
-                hub._broadcast_verified(
-                    ["legacy", "modern", "failed"],
-                    "wake",
-                )
-            )
-
-        self.assertEqual(
-            {"legacy": True, "modern": True, "failed": False},
-            result,
-        )
-        hub._broadcast.assert_awaited_once_with(
-            ["legacy"],
-            "wake",
-        )
-        completed.assert_awaited_once_with(
-            ["modern", "failed"],
-            ["wake", "home"],
-        )
+        self.assertTrue(all(result.values()))
+        self.assertEqual(ON_DEMAND_MAX_CONNECTIONS, peak)
 
     def test_identify_sleeps_then_wakes_phone_once(self) -> None:
         sender = AsyncMock(return_value=True)
