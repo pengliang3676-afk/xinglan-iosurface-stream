@@ -64,12 +64,15 @@ jobs:
           mkdir -p "$stage/root" "$stage/troll" "$stage/root/DEBIAN" output
           dpkg-deb -x "$stream_package" "$stage/root"
           dpkg-deb -x "$troll_package" "$stage/troll"
-          install -Dm755 "$stage/troll/usr/bin/trollvncserver" \
+          mkdir -p "$stage/root/usr/bin" \
+            "$stage/root/Library/LaunchDaemons" \
+            "$stage/root/Applications/XLStream.app"
+          install -m755 "$stage/troll/usr/bin/trollvncserver" \
             "$stage/root/usr/bin/trollvncserver"
-          install -Dm644 \
+          install -m644 \
             "$stage/troll/Library/LaunchDaemons/com.82flex.trollvnc.plist" \
             "$stage/root/Library/LaunchDaemons/com.82flex.trollvnc.plist"
-          install -Dm644 trollvnc-source/COPYING \
+          install -m644 trollvnc-source/COPYING \
             "$stage/root/Applications/XLStream.app/TrollVNC_GPLv2_LICENSE.txt"
           install -m644 phone/control "$stage/root/DEBIAN/control"
 
