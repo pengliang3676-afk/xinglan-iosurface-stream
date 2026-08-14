@@ -12,6 +12,7 @@ import threading
 import time
 import tkinter as tk
 from ctypes import wintypes
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -74,8 +75,16 @@ TILE_NUMBER_FONT_SIZE = 12
 MAIN_BUTTON_FONT = ("Microsoft YaHei UI", 10, "bold")
 WALL_GAP = 3
 DISPLAY_INTERVAL_MS = 40
-TOUCH_MOVE_INTERVAL_MS = 35
 LOGGER = logging.getLogger("xinglan.app")
+
+
+@dataclass
+class ActiveTouchRoute:
+    """Frozen recipients plus the latest coordinate for one mouse drag."""
+
+    targets: tuple[DeviceSession, ...]
+    x: float
+    y: float
 
 
 def load_brand_banner(master: tk.Misc) -> ImageTk.PhotoImage:
@@ -318,8 +327,8 @@ class DeviceTile:
         self.tile_width = tile_width
         self.tile_height = tile_height
         self.last_sequence = -1
-        self.last_move_at = 0
         self.dragging = False
+        self.last_touch_point: tuple[float, float] | None = None
         self.photo: ImageTk.PhotoImage | None = None
         self.render_size = (0, 0)
         self.image_bounds = (0, 0, tile_width, tile_height)
@@ -613,6 +622,7 @@ class DeviceTile:
         if point is None:
             return
         self.dragging = True
+        self.last_touch_point = point
         self.owner.route_touch(self.session, 1, *point, from_master=False)
 
     def _key_press(self, event: tk.Event) -> str | None:
@@ -629,19 +639,22 @@ class DeviceTile:
     def _move(self, event: tk.Event) -> None:
         if not self.dragging:
             return
-        now = event.time
-        if now - self.last_move_at < TOUCH_MOVE_INTERVAL_MS:
-            return
-        self.last_move_at = now
         point = self._normalized(event)
         if point is not None:
+            self.last_touch_point = point
+            # Preserve every Tk coordinate. DeviceSession performs noVNC's
+            # trailing-latest 17 ms scheduling on its asyncio thread.
             self.owner.route_touch(self.session, 2, *point, from_master=False)
 
     def _release(self, event: tk.Event) -> None:
         if not self.dragging:
             return
         self.dragging = False
-        point = self._normalized(event)
+        # Match noVNC: use the real release coordinate when it remains on the
+        # image; otherwise release at the last valid point to avoid a stuck
+        # contact after dragging outside the canvas.
+        point = self._normalized(event) or self.last_touch_point
+        self.last_touch_point = None
         if point is not None:
             self.owner.route_touch(self.session, 0, *point, from_master=False)
         self.owner.activate_ime(
@@ -729,8 +742,8 @@ class MasterView:
         self.owner = owner
         self.session: DeviceSession | None = None
         self.last_sequence = -1
-        self.last_move_at = 0
         self.dragging = False
+        self.last_touch_point: tuple[float, float] | None = None
         self.photo: ImageTk.PhotoImage | None = None
         self.render_size = (0, 0)
         width, height = MASTER_VIEW_SIZE
@@ -781,9 +794,18 @@ class MasterView:
     def set_session(self, session: DeviceSession | None) -> None:
         if self.session is session:
             return
+        if self.dragging and self.session is not None and self.last_touch_point is not None:
+            # Finish the old master's frozen route before changing canvases.
+            self.owner.route_touch(
+                self.session,
+                0,
+                *self.last_touch_point,
+                from_master=True,
+            )
         self.session = session
         self.last_sequence = -1
         self.dragging = False
+        self.last_touch_point = None
         if session is None:
             self.title.configure(text="主控大画面")
             self.status.configure(text="请选择主控手机", fg="#98a2b3")
@@ -870,6 +892,7 @@ class MasterView:
         if point is None:
             return
         self.dragging = True
+        self.last_touch_point = point
         self.owner.route_touch(self.session, 1, *point, from_master=True)
 
     def _key_press(self, event: tk.Event) -> str | None:
@@ -889,18 +912,17 @@ class MasterView:
     def _move(self, event: tk.Event) -> None:
         if not self.dragging or self.session is None:
             return
-        if event.time - self.last_move_at < TOUCH_MOVE_INTERVAL_MS:
-            return
-        self.last_move_at = event.time
         point = self._normalized(event)
         if point is not None:
+            self.last_touch_point = point
             self.owner.route_touch(self.session, 2, *point, from_master=True)
 
     def _release(self, event: tk.Event) -> None:
         if not self.dragging or self.session is None:
             return
         self.dragging = False
-        point = self._normalized(event)
+        point = self._normalized(event) or self.last_touch_point
+        self.last_touch_point = None
         if point is not None:
             self.owner.route_touch(self.session, 0, *point, from_master=True)
         self.owner.activate_ime(
@@ -926,6 +948,11 @@ class XinglanApp:
             group_size=GROUP_SIZE,
         )
         self.sessions: dict[str, DeviceSession] = {}
+        # Freeze recipients from DOWN through UP. Changing a checkbox, group,
+        # or master mid-drag must not leave a phone with an unmatched contact.
+        self._active_touch_routes: dict[
+            tuple[str, bool], ActiveTouchRoute
+        ] = {}
         # 提前为每台在线手机保持一条轻量级 USB 控制通道。顶部开屏/熄屏
         # 点击时只广播旧版原始指令，不再临时并发建立 60 条连接。
         self.action_hub = PersistentDeviceActionHub()
@@ -953,7 +980,7 @@ class XinglanApp:
         self.music_track_index = 0
         self.music_playing = False
         self._music_after_id: str | None = None
-        root.title("星澜")
+        root.title("星澜 · TrollVNC触控测试版")
         try:
             root.iconbitmap(default=str(PROJECT_DIR / "assets" / "xinglan.ico"))
         except tk.TclError:
@@ -1821,9 +1848,37 @@ class XinglanApp:
             tree.selection_set(first)
             load_selected()
 
+    def _discard_touch_routes_for_udids(self, udids: set[str]) -> None:
+        if not udids:
+            return
+        for route_key, route in list(self._active_touch_routes.items()):
+            if route_key[0] in udids:
+                # The source canvas is disappearing: close the complete
+                # synchronized gesture while every target is still alive.
+                for session in route.targets:
+                    session.send_touch(0, route.x, route.y)
+                self._active_touch_routes.pop(route_key, None)
+                continue
+            removed = tuple(
+                session for session in route.targets if session.udid in udids
+            )
+            if not removed:
+                continue
+            for session in removed:
+                session.send_touch(0, route.x, route.y)
+            remaining = tuple(
+                session for session in route.targets if session.udid not in udids
+            )
+            if remaining:
+                route.targets = remaining
+            else:
+                self._active_touch_routes.pop(route_key, None)
+
     def _stop_udids(self, udids: list[str]) -> int:
         stopped = 0
-        stopped_udids: set[str] = set()
+        stopped_udids = {udid for udid in udids if udid in self.active_udids}
+        # Route UP before stopping the corresponding RFB supervisors.
+        self._discard_touch_routes_for_udids(stopped_udids)
         for udid in udids:
             if udid not in self.active_udids:
                 continue
@@ -1834,7 +1889,6 @@ class XinglanApp:
                 # 会话线程不可复用；保留USB设备卡片，但换成全新的待机会话。
                 self.sessions[udid] = DeviceSession(udid)
             self.active_udids.discard(udid)
-            stopped_udids.add(udid)
             stopped += 1
             LOGGER.info("manual projection stopped: %s", udid)
         if stopped:
@@ -2370,6 +2424,7 @@ class XinglanApp:
             self.missing_scans[udid] = misses
             # 连续3轮（约6秒）都不存在才认定拔线，过滤Apple USB瞬时扫描抖动。
             if misses >= 3:
+                self._discard_touch_routes_for_udids({udid})
                 self.sessions.pop(udid).stop()
                 self.active_udids.discard(udid)
                 self.missing_scans.pop(udid, None)
@@ -2551,24 +2606,59 @@ class XinglanApp:
         *,
         from_master: bool,
     ) -> None:
-        # 与星澜网页一致：左侧小窗始终单机，只有右侧主控开启同步时才广播。
-        if self.sync_enabled.get() and from_master:
-            # 主控本机始终接收操作；同步副机只取当前组中已勾选且已投屏的手机。
-            targets = [source]
-            targets.extend(
-                self.sessions[udid]
-                for udid in self._current_group_udids()
-                if udid != source.udid
-                and udid in self.active_udids
-                and udid in self.selected_udids
+        route_key = (source.udid, from_master)
+        routes = getattr(self, "_active_touch_routes", None)
+        if routes is None:
+            routes = {}
+            self._active_touch_routes = routes
+
+        if kind == 1:
+            # Close an earlier incomplete gesture on this same canvas before
+            # replacing its target snapshot.
+            previous = routes.pop(route_key, None)
+            if previous is not None:
+                for session in previous.targets:
+                    session.send_touch(0, previous.x, previous.y)
+
+            # 左侧小窗始终单机；只有右侧主控开启同步时才广播。
+            if self.sync_enabled.get() and from_master:
+                candidates = [source]
+                candidates.extend(
+                    self.sessions[udid]
+                    for udid in self._current_group_udids()
+                    if udid != source.udid
+                    and udid in self.active_udids
+                    and udid in self.selected_udids
+                )
+            else:
+                candidates = [source]
+            accepted_targets = tuple(
+                session
+                for session in candidates
+                if session.send_touch(kind, x, y)
             )
+            if accepted_targets:
+                routes[route_key] = ActiveTouchRoute(accepted_targets, x, y)
+            accepted = len(accepted_targets)
         else:
-            targets = [source]
-        accepted = sum(1 for session in targets if session.send_touch(kind, x, y))
+            route = routes.get(route_key)
+            if route is not None:
+                route.x = x
+                route.y = y
+                targets = route.targets
+            else:
+                targets = ()
+            accepted = sum(
+                1 for session in targets if session.send_touch(kind, x, y)
+            )
+            if kind == 0:
+                routes.pop(route_key, None)
         # 鼠标按下、移动和松开都是高频事件。正常发送时不改Tk状态文字，
         # 避免右侧分组下拉框和按钮跟随每次操作反复重绘、闪动。
         if accepted == 0 and kind in (0, 1):
-            self.summary.set("鼠标操作未发送：请确认该手机正在投屏")
+            self.summary.set(
+                "TrollVNC触控未发送：请确认手机已安装并启用TrollVNC"
+            )
 
     def _keyboard_targets(
         self, source: DeviceSession, *, from_master: bool
@@ -2692,6 +2782,7 @@ class XinglanApp:
         ]
         stats = [session.stats() for session in active_sessions]
         total_fps = sum(item.fps for item in stats)
+        touch_online = sum(1 for item in stats if item.touch_online)
         reconnects = sum(item.reconnects for item in stats)
         decode_errors = sum(item.decode_errors for item in stats)
         dropped_frames = sum(item.phone_dropped_frames for item in stats)
@@ -2700,14 +2791,15 @@ class XinglanApp:
         memory_mb = working_set_mb()
         cpu_percent = self.load_sampler.sample_percent()
         self.health.set(
-            f"投屏 {len(stats)} 台 · 总帧率 {total_fps:.1f}"
+            f"投屏 {len(stats)} 台 · TrollVNC触控 {touch_online}/{len(stats)}"
+            f" · 总帧率 {total_fps:.1f}"
             f" · CPU {cpu_percent:.0f}% · 内存 {memory_mb:.0f} MB"
         )
         self.health_tick += 1
         if self.health_tick % 10 == 0:
             LOGGER.info(
-                "health devices=%s total_fps=%.1f cpu=%.1f%% memory=%.1fMB gc_objects=%s py_threads=%s reconnects=%s decode_errors=%s max_frame_age=%.0fms",
-                len(stats), total_fps,
+                "health devices=%s trollvnc_touch=%s total_fps=%.1f cpu=%.1f%% memory=%.1fMB gc_objects=%s py_threads=%s reconnects=%s decode_errors=%s max_frame_age=%.0fms",
+                len(stats), touch_online, total_fps,
                 cpu_percent, memory_mb,
                 len(gc.get_objects()), threading.active_count(),
                 reconnects, decode_errors, max_age_ms,
@@ -2726,6 +2818,7 @@ class XinglanApp:
             self._usb_count_after_id = None
         self.action_hub.close()
         self.ime_worker.close()
+        self._active_touch_routes.clear()
         for session in self.sessions.values():
             session.stop()
         deadline = time.monotonic() + 2.0
@@ -2745,7 +2838,9 @@ def main() -> None:
 
         ime_worker_main()
         return
-    parser = argparse.ArgumentParser(description="星澜 USB 原生群控新版")
+    parser = argparse.ArgumentParser(
+        description="星澜 H.264投屏 + TrollVNC独立触控测试版"
+    )
     parser.add_argument("--max-devices", type=int, default=60)
     args = parser.parse_args()
     log_path = configure_logging(PROJECT_DIR)

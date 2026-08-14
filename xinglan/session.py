@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import secrets
 import socket
 import threading
@@ -50,6 +51,14 @@ from .protocol import (  # noqa: E402
 from .video_decoder import create_h264_decoder  # noqa: E402
 
 from .usb_connection import ServiceConnection  # noqa: E402
+from .trollvnc_rfb import TrollVNCRfbClient  # noqa: E402
+from .trollvnc_touch import (  # noqa: E402
+    TOUCH_DOWN,
+    TOUCH_MOVE,
+    TOUCH_UP,
+    NoVncPointerScheduler,
+    PointerSample,
+)
 
 
 LOGGER = logging.getLogger("xinglan.session")
@@ -124,6 +133,7 @@ class SessionStats:
     last_frame_age: float | None
     error: str
     control_online: bool
+    touch_online: bool
     status_online: bool
     status_age: float | None
     battery_percent: float | None
@@ -153,6 +163,7 @@ class DeviceSession:
         self._fps = 0.0
         self._reconnects = 0
         self._control_online = False
+        self._touch_online = False
         self._status_online = False
         self._status_received_at = 0.0
         self._device_status: DeviceStatus | None = None
@@ -161,6 +172,15 @@ class DeviceSession:
         self._stop = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._control_queue: asyncio.Queue[ControlEnvelope] | None = None
+        # TrollVNC is an independent control-only connection.  The GUI feeds
+        # raw mouse samples into a noVNC-compatible 17 ms scheduler; emitted
+        # MOVE samples use another latest-value mailbox so a stalled USB write
+        # cannot build an old-coordinate FIFO.
+        self._rfb_touch_queue: asyncio.Queue[ControlEnvelope] | None = None
+        self._rfb_touch_scheduler: NoVncPointerScheduler | None = None
+        self._rfb_touch_generation = 0
+        self._rfb_latest_moves: dict[int, PointerSample] = {}
+        self._rfb_move_markers: set[int] = set()
         self._decoder_reset = threading.Event()
         # The phone remembers recently executed system-action sequences so an
         # ACK loss followed by a USB reconnect cannot press Home twice.  Seed
@@ -180,18 +200,25 @@ class DeviceSession:
     def stop(self) -> None:
         self._stop.set()
         self.latest.clear()
+        self._rfb_latest_moves.clear()
+        self._rfb_move_markers.clear()
         with self._lock:
             self._status = "已断开投屏"
             self._error = ""
             self._fps = 0.0
             self._control_online = False
+            self._touch_online = False
             self._status_online = False
             self._status_received_at = 0.0
             self._device_status = None
             self._decoder_backend = "等待"
         loop = self._loop
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(lambda: None)
+            scheduler = self._rfb_touch_scheduler
+            if scheduler is not None:
+                loop.call_soon_threadsafe(scheduler.reset)
+            else:
+                loop.call_soon_threadsafe(lambda: None)
 
     def wait_stopped(self, timeout: float = 0.0) -> bool:
         """Wait for the USB/decode thread to finish after stop was requested."""
@@ -200,19 +227,34 @@ class DeviceSession:
         return not self._thread.is_alive()
 
     def send_touch(self, kind: int, normalized_x: float, normalized_y: float) -> bool:
-        try:
-            phase = TouchPhase(kind)
-        except ValueError:
+        # The experimental build deliberately bypasses XLControl TOUCH and
+        # TOUCH_STREAM.  Only TrollVNC's ordinary RFB left-button lifecycle is
+        # accepted; the previous CANCEL anti-fling experiment is not used.
+        if kind not in (TOUCH_UP, TOUCH_DOWN, TOUCH_MOVE):
             return False
-        command = TouchCommand(
-            phase=phase,
-            finger=0,
-            x=normalized_x,
-            y=normalized_y,
-            pressure=0.0 if phase in (TouchPhase.UP, TouchPhase.CANCEL) else 1.0,
-            timestamp_ms=int(time.monotonic() * 1000),
-        )
-        return self._enqueue_control(ControlEnvelope("touch", command))
+        if not math.isfinite(normalized_x) or not math.isfinite(normalized_y):
+            return False
+        loop = self._loop
+        scheduler = self._rfb_touch_scheduler
+        with self._lock:
+            touch_online = self._touch_online
+        if (
+            not touch_online
+            or loop is None
+            or scheduler is None
+            or not loop.is_running()
+        ):
+            return False
+        try:
+            loop.call_soon_threadsafe(
+                scheduler.submit,
+                kind,
+                normalized_x,
+                normalized_y,
+            )
+        except RuntimeError:
+            return False
+        return True
 
     def send_system_action(self, action: SystemAction) -> bool:
         return self._enqueue_control(ControlEnvelope("system", action))
@@ -291,6 +333,7 @@ class DeviceSession:
                 frame_age,
                 self._error,
                 self._control_online,
+                self._touch_online,
                 self._status_online,
                 status_age,
                 battery_percent,
@@ -315,6 +358,13 @@ class DeviceSession:
             self._control_online = online
         if changed:
             LOGGER.info("device=%s control_online=%s", self.udid, online)
+
+    def _set_touch_online(self, online: bool) -> None:
+        with self._lock:
+            changed = online != self._touch_online
+            self._touch_online = online
+        if changed:
+            LOGGER.info("device=%s trollvnc_touch_online=%s", self.udid, online)
 
     def _set_status_online(self, online: bool) -> None:
         with self._lock:
@@ -347,6 +397,11 @@ class DeviceSession:
         self._loop = loop
         asyncio.set_event_loop(loop)
         self._control_queue = asyncio.Queue(maxsize=64)
+        self._rfb_touch_queue = asyncio.Queue(maxsize=64)
+        self._rfb_touch_scheduler = NoVncPointerScheduler(
+            loop,
+            self._enqueue_rfb_pointer,
+        )
         try:
             loop.run_until_complete(self._run())
         finally:
@@ -361,6 +416,7 @@ class DeviceSession:
         tasks = [
             asyncio.create_task(self._video_supervisor()),
             asyncio.create_task(self._control_supervisor()),
+            asyncio.create_task(self._rfb_touch_supervisor()),
             asyncio.create_task(self._status_supervisor()),
         ]
         try:
@@ -558,6 +614,153 @@ class DeviceSession:
             finally:
                 self._set_control_online(False)
                 await self._close_channel(connection)
+
+    def _enqueue_rfb_pointer(self, sample: PointerSample) -> None:
+        """Queue a scheduler emission on the device event-loop thread."""
+
+        queue = self._rfb_touch_queue
+        if queue is None:
+            return
+        if sample.phase == TOUCH_DOWN:
+            self._rfb_touch_generation += 1
+        elif sample.phase == TOUCH_MOVE:
+            generation = self._rfb_touch_generation
+            self._rfb_latest_moves[generation] = sample
+            if generation in self._rfb_move_markers:
+                return
+            try:
+                queue.put_nowait(ControlEnvelope("rfb_move_latest", generation))
+                self._rfb_move_markers.add(generation)
+            except asyncio.QueueFull:
+                self._rfb_latest_moves.pop(generation, None)
+            return
+
+        if queue.full():
+            retained: list[ControlEnvelope] = []
+            removed_move = False
+            while not queue.empty():
+                queued = queue.get_nowait()
+                if (
+                    not removed_move
+                    and queued.kind == "rfb_move_latest"
+                    and isinstance(queued.value, int)
+                ):
+                    self._rfb_move_markers.discard(queued.value)
+                    self._rfb_latest_moves.pop(queued.value, None)
+                    removed_move = True
+                    continue
+                retained.append(queued)
+            for queued in retained[-queue.maxsize:]:
+                queue.put_nowait(queued)
+            if queue.full():
+                LOGGER.warning(
+                    "device=%s TrollVNC touch queue full; dropping phase=%s",
+                    self.udid,
+                    sample.phase,
+                )
+                return
+        queue.put_nowait(ControlEnvelope("rfb_pointer", sample))
+
+    def _discard_rfb_touch_queue(self) -> None:
+        queue = self._rfb_touch_queue
+        if queue is not None:
+            while not queue.empty():
+                queue.get_nowait()
+        self._rfb_latest_moves.clear()
+        self._rfb_move_markers.clear()
+
+    async def _send_latest_rfb_move(
+        self,
+        client: TrollVNCRfbClient,
+        generation: int,
+    ) -> None:
+        # Clear before awaiting the USB write.  A newer scheduler emission can
+        # then create a fresh marker which remains ordered before a later UP.
+        self._rfb_move_markers.discard(generation)
+        sample = self._rfb_latest_moves.pop(generation, None)
+        if sample is None:
+            return
+        await asyncio.wait_for(
+            client.pointer_move(sample.x, sample.y),
+            timeout=1.0,
+        )
+
+    @staticmethod
+    async def _send_rfb_pointer(
+        client: TrollVNCRfbClient,
+        sample: PointerSample,
+    ) -> None:
+        if sample.phase == TOUCH_DOWN:
+            operation = client.pointer_down(sample.x, sample.y)
+        elif sample.phase == TOUCH_UP:
+            operation = client.pointer_up(sample.x, sample.y)
+        else:
+            raise ValueError(f"invalid queued RFB pointer phase: {sample.phase}")
+        await asyncio.wait_for(operation, timeout=1.0)
+
+    async def _rfb_touch_supervisor(self) -> None:
+        assert self._rfb_touch_queue is not None
+        assert self._rfb_touch_scheduler is not None
+        delay = 0.3
+        while not self._stop.is_set():
+            client: TrollVNCRfbClient | None = None
+            try:
+                client = await TrollVNCRfbClient.connect(self.udid, timeout=4.0)
+                self._discard_rfb_touch_queue()
+                self._rfb_touch_scheduler.reset()
+                self._set_touch_online(True)
+                delay = 0.3
+                LOGGER.info(
+                    "device=%s TrollVNC RFB ready size=%sx%s name=%s",
+                    self.udid,
+                    client.width,
+                    client.height,
+                    client.name,
+                )
+                while not self._stop.is_set():
+                    envelope = await self._rfb_touch_queue.get()
+                    if envelope.kind == "rfb_move_latest":
+                        if not isinstance(envelope.value, int):
+                            raise ValueError("RFB MOVE marker missing generation")
+                        await self._send_latest_rfb_move(client, envelope.value)
+                    elif envelope.kind == "rfb_pointer" and isinstance(
+                        envelope.value,
+                        PointerSample,
+                    ):
+                        await self._send_rfb_pointer(client, envelope.value)
+                    else:
+                        raise ValueError(f"unknown RFB touch item: {envelope.kind}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._set_touch_online(False)
+                LOGGER.warning(
+                    "device=%s TrollVNC touch reconnect: %s",
+                    self.udid,
+                    exc,
+                )
+                # Close immediately before the reconnect backoff.  If the
+                # transport itself is still writable, TrollVNCRfbClient.close
+                # emits a best-effort UP for a held left button.
+                self._rfb_touch_scheduler.reset()
+                self._discard_rfb_touch_queue()
+                if client is not None:
+                    try:
+                        await asyncio.wait_for(client.close(), timeout=1.0)
+                    except Exception:
+                        pass
+                    client = None
+                await asyncio.sleep(delay)
+                delay = min(3.0, delay * 1.5)
+            finally:
+                self._set_touch_online(False)
+                self._rfb_touch_scheduler.reset()
+                self._discard_rfb_touch_queue()
+                if client is not None:
+                    try:
+                        await asyncio.wait_for(client.close(), timeout=1.0)
+                    except Exception:
+                        pass
 
     async def _status_supervisor(self) -> None:
         delay = 0.5

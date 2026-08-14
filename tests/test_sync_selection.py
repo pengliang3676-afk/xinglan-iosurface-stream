@@ -54,6 +54,7 @@ def make_app(sync: bool) -> tuple[XinglanApp, dict[str, Session]]:
     app = XinglanApp.__new__(XinglanApp)
     sessions = {udid: Session(udid) for udid in ("master", "checked", "unchecked")}
     app.sessions = sessions
+    app._active_touch_routes = {}
     app.active_udids = set(sessions)
     app.selected_udids = {"checked"}
     app.master_udid = "master"
@@ -88,6 +89,57 @@ class SyncSelectionTests(unittest.TestCase):
         self.assertEqual(1, len(sessions["master"].touches))
         self.assertEqual(0, len(sessions["checked"].touches))
         self.assertEqual(0, len(sessions["unchecked"].touches))
+
+    def test_touch_targets_are_frozen_until_release(self) -> None:
+        app, sessions = make_app(sync=True)
+        app.route_touch(sessions["master"], 1, 0.1, 0.2, from_master=True)
+
+        # Changing the checkboxes during the drag must not add a phone which
+        # missed DOWN or remove UP from the original checked phone.
+        app.selected_udids = {"unchecked"}
+        app.route_touch(sessions["master"], 2, 0.3, 0.4, from_master=True)
+        app.route_touch(sessions["master"], 0, 0.5, 0.6, from_master=True)
+
+        self.assertEqual(
+            [(1, 0.1, 0.2), (2, 0.3, 0.4), (0, 0.5, 0.6)],
+            sessions["master"].touches,
+        )
+        self.assertEqual(
+            [(1, 0.1, 0.2), (2, 0.3, 0.4), (0, 0.5, 0.6)],
+            sessions["checked"].touches,
+        )
+        self.assertEqual([], sessions["unchecked"].touches)
+        self.assertEqual({}, app._active_touch_routes)
+
+    def test_removing_one_synced_target_keeps_up_for_other_targets(self) -> None:
+        app, sessions = make_app(sync=True)
+        app.route_touch(sessions["master"], 1, 0.1, 0.2, from_master=True)
+        app.route_touch(sessions["master"], 2, 0.3, 0.4, from_master=True)
+
+        app._discard_touch_routes_for_udids({"checked"})
+        app.route_touch(sessions["master"], 0, 0.5, 0.6, from_master=True)
+
+        self.assertEqual(
+            [(1, 0.1, 0.2), (2, 0.3, 0.4), (0, 0.5, 0.6)],
+            sessions["master"].touches,
+        )
+        self.assertEqual(
+            [(1, 0.1, 0.2), (2, 0.3, 0.4), (0, 0.3, 0.4)],
+            sessions["checked"].touches,
+        )
+        self.assertEqual({}, app._active_touch_routes)
+
+    def test_removing_source_closes_every_synced_target_at_last_point(self) -> None:
+        app, sessions = make_app(sync=True)
+        app.route_touch(sessions["master"], 1, 0.1, 0.2, from_master=True)
+        app.route_touch(sessions["master"], 2, 0.3, 0.4, from_master=True)
+
+        app._discard_touch_routes_for_udids({"master"})
+
+        expected = [(1, 0.1, 0.2), (2, 0.3, 0.4), (0, 0.3, 0.4)]
+        self.assertEqual(expected, sessions["master"].touches)
+        self.assertEqual(expected, sessions["checked"].touches)
+        self.assertEqual({}, app._active_touch_routes)
 
     def test_small_window_system_shortcut_never_broadcasts(self) -> None:
         app, sessions = make_app(sync=True)
