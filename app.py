@@ -980,7 +980,7 @@ class XinglanApp:
         self.music_track_index = 0
         self.music_playing = False
         self._music_after_id: str | None = None
-        root.title("星澜 · TrollVNC触控测试版")
+        root.title("星澜 · TrollVNC触控版")
         try:
             root.iconbitmap(default=str(PROJECT_DIR / "assets" / "xinglan.ico"))
         except tk.TclError:
@@ -2839,7 +2839,7 @@ def main() -> None:
         ime_worker_main()
         return
     parser = argparse.ArgumentParser(
-        description="星澜 H.264投屏 + TrollVNC独立触控测试版"
+        description="星澜 H.264投屏 + TrollVNC独立触控版"
     )
     parser.add_argument("--max-devices", type=int, default=60)
     args = parser.parse_args()

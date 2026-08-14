@@ -1,0 +1,37 @@
+星澜 TrollVNC 独立触控版
+=========================
+
+当前正式采用的组合：
+- 投屏继续使用星澜原来的 XLStream / H.264，画面链路不变。
+- 鼠标 DOWN / MOVE / UP 只通过 USB 连接手机 TrollVNC 的 5901 端口。
+- 不使用星澜原来的手机触控注入，不使用之前的 CANCEL 防甩方案。
+- Home、控制中心、键盘输入、文件传输继续使用原来的独立系统控制通道。
+
+手机安装
+--------
+1. 普通 Dopamine 越狱只安装“2_TrollVNC静默_普通越狱版.deb”。
+2. Dopamine RootHide 越狱只安装“2_TrollVNC静默_RootHide版.deb”。
+3. 两个版本绝对不要同时安装。
+4. 安装或更新后执行一次 Respring（重启用户空间）。
+5. TrollVNC 必须启用，端口保持 5901，不能开启 View Only。
+6. 当前客户端使用 TrollVNC 的无密码连接；Full Password 和 View-only Password 都要留空。
+
+电脑使用
+--------
+1. 先关闭其他星澜或 VNC 客户端，再运行“星澜.exe”。
+2. 等顶部状态出现“TrollVNC触控 n/n”；目标手机计入在线后再操作。
+3. 不需要打开 TrollVNC 浏览器画面。
+4. 首次使用先保持手机竖屏；随后测试点击、拖动、滑块、长按和同步控制。
+5. 若显示 0/n 或鼠标不响应，检查插件版本、Respring、5901 端口和密码设置。
+6. 运行日志位于程序目录的 logs 文件夹。
+
+触控模型
+--------
+- 使用 TrollVNC/noVNC 的鼠标调度：17ms、保留最新 MOVE、普通 UP。
+- 画面始终来自星澜 H.264，不请求 TrollVNC 的 VNC 画面。
+
+开源说明
+--------
+TrollVNC 项目：https://github.com/OwnGoalStudio/TrollVNC
+协议：GPL-2.0。随手机插件附带 TrollVNC_GPLv2_LICENSE.txt；本机对应源码位于：
+D:\星澜\开发项目\github-mirror-tests\TrollVNC
