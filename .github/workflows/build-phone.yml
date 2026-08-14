@@ -7,7 +7,12 @@ on:
       - main
     paths:
       - "phone/**"
+      - "tests/test_phone_package_safety.py"
       - ".github/workflows/build-phone.yml"
+
+env:
+  TROLLVNC_REPOSITORY: https://github.com/pengliang3676-afk/TrollVNC.git
+  TROLLVNC_COMMIT: 57af31e1eb204251d21d681503fa3f0765a8fd96
 
 jobs:
   build:
@@ -19,32 +24,59 @@ jobs:
       - name: Verify package source safety
         run: python3 -m unittest tests.test_phone_package_safety
 
-      - name: Install Theos
+      - name: Install build dependencies
         env:
           HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
-          brew install ldid xz
+          brew install ldid xz dpkg
           git clone --recursive --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
 
-      - name: Build RootHide package
+      - name: Build XLStream RootHide package
         env:
           THEOS: ${{ runner.temp }}/theos-link
         run: |
           ln -s "$HOME/theos" "$THEOS"
           make -C phone clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 
-      - name: Collect package
+      - name: Build pinned silent TrollVNC RootHide payload
+        env:
+          THEOS: ${{ runner.temp }}/theos-link
         run: |
-          mkdir -p output
-          version="$(awk '/^Version:/{print $2}' phone/control)"
-          package="$(find phone/packages -name '*.deb' -print -quit)"
-          test -n "$package"
-          cp "$package" "output/星澜TP${version}.deb"
+          git clone --recursive "$TROLLVNC_REPOSITORY" trollvnc-source
+          git -C trollvnc-source checkout --detach "$TROLLVNC_COMMIT"
+          test "$(git -C trollvnc-source rev-parse HEAD)" = "$TROLLVNC_COMMIT"
+          make -C trollvnc-source clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 
-      - name: Upload package
+      - name: Assemble one RootHide integrated package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk '/^Version:/{print $2}' phone/control)"
+          stream_package="$(find phone/packages -name '*.deb' -print -quit)"
+          troll_package="$(find trollvnc-source/packages -name '*.deb' -print -quit)"
+          test -n "$stream_package"
+          test -n "$troll_package"
+
+          stage="$(mktemp -d)"
+          mkdir -p "$stage/root" "$stage/troll" "$stage/root/DEBIAN" output
+          dpkg-deb -x "$stream_package" "$stage/root"
+          dpkg-deb -x "$troll_package" "$stage/troll"
+          install -Dm755 "$stage/troll/usr/bin/trollvncserver" \
+            "$stage/root/usr/bin/trollvncserver"
+          install -Dm644 \
+            "$stage/troll/Library/LaunchDaemons/com.82flex.trollvnc.plist" \
+            "$stage/root/Library/LaunchDaemons/com.82flex.trollvnc.plist"
+          install -Dm644 trollvnc-source/COPYING \
+            "$stage/root/Applications/XLStream.app/TrollVNC_GPLv2_LICENSE.txt"
+          install -m644 phone/control "$stage/root/DEBIAN/control"
+
+          output="output/星澜TP-TrollVNC静默整合版_RootHide_${version}.deb"
+          dpkg-deb --root-owner-group -Zxz --build "$stage/root" "$output"
+
+      - name: Upload integrated RootHide package
         uses: actions/upload-artifact@v4
         with:
-          name: XLStream-RootHide
+          name: XingLan-RootHide-Integrated
           path: output/*.deb
           if-no-files-found: error
 
@@ -52,37 +84,49 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Download RootHide package
+      - name: Download integrated RootHide package
         uses: actions/download-artifact@v4
         with:
-          name: XLStream-RootHide
+          name: XingLan-RootHide-Integrated
           path: packages
 
-      - name: Verify built package metadata and scripts
+      - name: Verify metadata, payload and removed native touch
         shell: bash
         run: |
           set -euo pipefail
-          count=0
-          for package in packages/*.deb; do
-            count=$((count + 1))
-            verify_dir="$(mktemp -d)"
-            dpkg-deb --control "$package" "$verify_dir"
-            grep -qx 'Package: com.jibeib.xlstream.safe' "$verify_dir/control"
-            grep -qx 'Provides: com.jibeib.xlstream' "$verify_dir/control"
-            grep -qx 'Replaces: com.jibeib.xlstream' "$verify_dir/control"
-            ! grep -Eq '^(Conflicts|Breaks):' "$verify_dir/control"
-            for script in preinst postinst prerm postrm config; do
-              test ! -e "$verify_dir/$script"
-            done
-            dpkg-deb --fsys-tarfile "$package" | tar -tf - > "$verify_dir/files.txt"
-            grep -q 'XLStream.app/bin/xlstreamd' "$verify_dir/files.txt"
-            grep -q 'XLSystemActions.dylib' "$verify_dir/files.txt"
-            ! grep -q 'XLStream.app/bin/xltouchd' "$verify_dir/files.txt"
-            ! grep -q 'XLTouchActions.dylib' "$verify_dir/files.txt"
-            ! grep -q 'com.jibeib.xltouchd.plist' "$verify_dir/files.txt"
-            ! grep -q 'XLStream.app/ioscpy-LICENSE.txt' "$verify_dir/files.txt"
+          package="$(find packages -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$package"
+          test "$(find packages -maxdepth 1 -name '*.deb' | wc -l)" -eq 1
+
+          verify_dir="$(mktemp -d)"
+          root="$verify_dir/root"
+          mkdir -p "$root"
+          dpkg-deb --control "$package" "$verify_dir/control-dir"
+          control="$verify_dir/control-dir/control"
+          grep -qx 'Package: com.jibeib.xlstream.safe' "$control"
+          grep -qx 'Version: 0.9.0' "$control"
+          grep -qx 'Architecture: iphoneos-arm64e' "$control"
+          grep -qx 'Provides: com.jibeib.xlstream, com.82flex.trollvnc' "$control"
+          grep -qx 'Replaces: com.jibeib.xlstream, com.82flex.trollvnc' "$control"
+          ! grep -Eq '^(Conflicts|Breaks):' "$control"
+          for script in preinst postinst prerm postrm config; do
+            test ! -e "$verify_dir/control-dir/$script"
           done
-          test "$count" -eq 1
+
+          dpkg-deb -x "$package" "$root"
+          test -x "$root/Applications/XLStream.app/bin/xlstreamd"
+          test -e "$root/Library/MobileSubstrate/DynamicLibraries/XLSystemActions.dylib"
+          test -x "$root/usr/bin/trollvncserver"
+          test -e "$root/Library/LaunchDaemons/com.82flex.trollvnc.plist"
+          test -e "$root/Applications/XLStream.app/TrollVNC_GPLv2_LICENSE.txt"
+          test ! -e "$root/Applications/XLStream.app/bin/xltouchd"
+          test ! -e "$root/Library/PreferenceBundles/TrollVNCPrefs.bundle"
+          test ! -e "$root/Library/ControlCenter/Bundles/CCTrollVNC.bundle"
+          test ! -e "$root/usr/share/trollvnc/webclients"
+
+          ! strings "$root/Applications/XLStream.app/bin/xlstreamd" | grep -q 'sendTouchPhase'
+          ! strings "$root/Applications/XLStream.app/bin/xlstreamd" | grep -q 'IOHIDEventCreateDigitizerEvent'
+          ! strings "$root/Applications/XLStream.app/bin/xlstreamd" | grep -q 'IOHIDEventCreateDigitizerFingerEvent'
 
       - name: Verify Replaces migration bypasses legacy prerm
         shell: bash

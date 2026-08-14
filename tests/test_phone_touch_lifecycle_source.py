@@ -8,18 +8,21 @@ PROJECT = Path(__file__).resolve().parent.parent
 
 
 class PhoneTouchLifecycleSourceTests(unittest.TestCase):
-    def test_trollvnc_style_touch_lifecycle_is_preserved(self) -> None:
-        source = (PROJECT / "phone" / "XLHIDSender.mm").read_text(
+    def test_xlstream_native_touch_backend_is_removed(self) -> None:
+        protocol = (PROJECT / "phone" / "XLControlProtocol.h").read_text(
             encoding="utf-8"
         )
-        self.assertIn("XLTouchIdentifierForFinger", source)
-        self.assertIn(
-            "eventMask = XLDigitizerEventPosition | XLDigitizerEventAttribute",
-            source,
+        server = (PROJECT / "phone" / "XLControlServer.mm").read_text(
+            encoding="utf-8"
         )
-        self.assertIn("double pathRadius = touching ? 5.0 : 0.0", source)
-        self.assertNotIn("_setIntegerValue(parent, XLDigitizerTouch, 1)", source)
-        self.assertNotIn("_setIntegerValue(parent, XLDigitizerRange, 1)", source)
+        sender = (PROJECT / "phone" / "XLHIDSender.mm").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("XLMessageTouch", protocol)
+        self.assertNotIn("XLCapabilityTouch", protocol)
+        self.assertNotIn("XLTouchPayload", protocol)
+        self.assertNotIn("XLHandleTouch", server)
+        self.assertNotIn("sendTouchPhase", sender)
 
 
 if __name__ == "__main__":

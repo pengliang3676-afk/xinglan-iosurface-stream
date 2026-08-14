@@ -1,11 +1,11 @@
 Package: com.jibeib.xlstream.safe
-Name: 星澜
+Name: 星澜TP + TrollVNC静默版
 Depends: firmware (>= 15.0), ellekit | mobilesubstrate
-Provides: com.jibeib.xlstream
-Replaces: com.jibeib.xlstream
-Version: 0.8.3
+Provides: com.jibeib.xlstream, com.82flex.trollvnc
+Replaces: com.jibeib.xlstream, com.82flex.trollvnc
+Version: 0.9.0
 Architecture: iphoneos-arm64e
-Description: XLStream USB video, group control, HID touch and recursive file or folder transfer for owned devices.
+Description: RootHide-only XLStream USB video and control with integrated silent TrollVNC touch.
 Maintainer: jibeib
 Author: jibeib
 Section: System

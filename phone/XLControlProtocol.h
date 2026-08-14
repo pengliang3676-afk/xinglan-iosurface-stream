@@ -14,26 +14,16 @@ static const uint8_t XLStatusMagic[4] = {'X', 'L', 'S', '1'};
 enum XLMessageType : uint8_t {
     XLMessageHello = 1,
     XLMessageHelloAck = 2,
-    XLMessageTouch = 10,
     XLMessageSystemAction = 11,
     XLMessageRequestKeyframe = 12,
     XLMessageTextInput = 13,
     XLMessageKeyEvent = 14,
-    // Latest-coordinate MOVE packet; deliberately has no ACK.
-    XLMessageTouchStream = 15,
     XLMessagePing = 20,
     XLMessagePong = 21,
     XLMessageAck = 22,
     XLMessageError = 23,
     XLMessageDeviceStatus = 30,
     XLMessageVideoStats = 31,
-};
-
-enum XLTouchPhase : uint8_t {
-    XLTouchPhaseUp = 0,
-    XLTouchPhaseDown = 1,
-    XLTouchPhaseMove = 2,
-    XLTouchPhaseCancel = 3,
 };
 
 enum XLSystemAction : uint16_t {
@@ -47,13 +37,11 @@ enum XLSystemAction : uint16_t {
 
 enum XLCapability : uint32_t {
     XLCapabilityVideoH264 = 1u << 0,
-    XLCapabilityTouch = 1u << 1,
     XLCapabilitySystemActions = 1u << 2,
     XLCapabilityStatus = 1u << 3,
     XLCapabilityKeyframeRequest = 1u << 4,
     XLCapabilityFileTransfer = 1u << 5,
     XLCapabilityTextInput = 1u << 6,
-    XLCapabilityTouchStream = 1u << 7,
 };
 
 enum XLDeviceStatusFlag : uint16_t {
@@ -80,15 +68,6 @@ typedef struct {
     uint16_t protocolVersion;
     uint16_t reserved;
 } XLHelloPayload;
-
-typedef struct {
-    uint8_t phase;
-    uint8_t finger;
-    uint16_t x;
-    uint16_t y;
-    uint16_t pressure;
-    uint32_t timestampMs;
-} XLTouchPayload;
 
 typedef struct {
     uint16_t action;
@@ -129,5 +108,4 @@ typedef struct {
 
 static_assert(sizeof(XLMessageHeader) == 16, "XLMessageHeader must be 16 bytes");
 static_assert(sizeof(XLHelloPayload) == 12, "XLHelloPayload must be 12 bytes");
-static_assert(sizeof(XLTouchPayload) == 12, "XLTouchPayload must be 12 bytes");
 static_assert(sizeof(XLDeviceStatusPayload) == 20, "XLDeviceStatusPayload must be 20 bytes");

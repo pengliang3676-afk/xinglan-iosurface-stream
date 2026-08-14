@@ -1,38 +1,43 @@
-星澜 TrollVNC 独立触控版
-=========================
+星澜 RootHide 手机端整合插件使用说明
+=====================================
 
-当前正式采用的组合：
-- 投屏继续使用星澜原来的 XLStream / H.264，画面链路不变。
-- 鼠标 DOWN / MOVE / UP 只通过 USB 连接手机 TrollVNC 的 5901 端口。
-- 不使用星澜原来的手机触控注入，不使用之前的 CANCEL 防甩方案。
-- Home、控制中心、键盘输入、文件传输继续使用原来的独立系统控制通道。
+正式版只保留一个手机插件：
 
-手机安装
+  星澜TP-TrollVNC静默整合版_RootHide_0.9.0.deb
+
+它同时负责两条互不抢占的通道：
+
+- 画面仍由星澜 XLStream / H.264 传输。
+- 鼠标触控只由 TrollVNC 静默服务通过 USB 5901 端口处理。
+
+安装与升级
+----------
+
+1. 手机必须使用 Dopamine RootHide 越狱。
+2. 已安装星澜TP 0.8.3：直接在 Sileo 安装 0.9.0 整合包覆盖升级，不用先卸载。
+3. 安装结束后执行一次 Respring。
+4. 如果手机以前单独安装过 com.82flex.trollvnc，请先卸载独立 TrollVNC，再安装整合包；只有星澜TP 0.8.3 的手机不需要这一步。
+5. 不要再安装普通越狱版 TrollVNC，也不要同时安装第二个 TrollVNC 包。
+
+新旧区别
 --------
-1. “手机端_投屏插件/星澜TP0.8.3.deb”是当前 RootHide 正式投屏包，负责 H.264、系统控制、键盘和文件传输；手机已安装同版时不用重装。
-2. 普通 Dopamine 越狱的 TrollVNC 只安装“2_TrollVNC静默_普通越狱版.deb”。
-3. Dopamine RootHide 越狱的 TrollVNC 只安装“2_TrollVNC静默_RootHide版.deb”。
-4. 两个 TrollVNC 版本绝对不要同时安装。
-5. 安装或更新后执行一次 Respring（重启用户空间）。
-6. TrollVNC 必须启用，端口保持 5901，不能开启 View Only。
-7. 当前客户端使用 TrollVNC 的无密码连接；Full Password 和 View-only Password 都要留空。
 
-电脑使用
---------
-1. 先关闭其他星澜或 VNC 客户端，再运行“星澜.exe”。
-2. 等顶部状态出现“TrollVNC触控 n/n”；目标手机计入在线后再操作。
-3. 不需要打开 TrollVNC 浏览器画面。
-4. 首次使用先保持手机竖屏；随后测试点击、拖动、滑块、长按和同步控制。
-5. 若显示 0/n 或鼠标不响应，检查插件版本、Respring、5901 端口和密码设置。
-6. 运行日志位于程序目录的 logs 文件夹。
+- 0.8.3 的 XLStream 原生鼠标触控代码已从 0.9.0 删除，不会与 TrollVNC 同时注入。
+- 键盘、文字输入、Home、开屏、息屏、文件传输仍由 XLStream 提供。
+- 开屏/息屏的 6000 端口改为按按钮时临时连接，用完即断开，不再为 60 台手机常驻重连。
+- TrollVNC 不传画面，不显示连接横幅，不包含设置面板；星澜电脑端只使用它的触控通道。
 
-触控模型
---------
-- 使用 TrollVNC/noVNC 的鼠标调度：17ms、保留最新 MOVE、普通 UP。
-- 画面始终来自星澜 H.264，不请求 TrollVNC 的 VNC 画面。
+验证
+----
 
-开源说明
---------
-TrollVNC 项目：https://github.com/OwnGoalStudio/TrollVNC
-协议：GPL-2.0。随手机插件附带 TrollVNC_GPLv2_LICENSE.txt；本机对应源码位于：
-D:\星澜\开发项目\github-mirror-tests\TrollVNC
+1. Respring 后运行星澜.exe。
+2. 等顶部 TrollVNC 触控在线数量出现。
+3. 测试点击、页面拖动、长按和滑块。
+4. 若个别手机没有触控，先确认已安装 0.9.0 整合包并完成 Respring。
+
+开源与许可证
+------------
+
+TrollVNC 源码： https://github.com/pengliang3676-afk/TrollVNC
+固定提交：57af31e1eb204251d21d681503fa3f0765a8fd96
+协议：GPL-2.0。许可证文件已放入手机端整合包。

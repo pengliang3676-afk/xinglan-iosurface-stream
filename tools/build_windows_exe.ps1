@@ -13,9 +13,7 @@ $portableDeps = Join-Path $workspaceRoot "usb_capture_deps"
 $usbmuxTools = Join-Path (Split-Path $projectRoot -Parent) "independent-usbmux-test"
 $baselineProject = Join-Path (Split-Path $projectRoot -Parent) "星澜_USB原生群控_新版"
 $configSource = Join-Path $baselineProject "config\device_groups.json"
-$projectionPackage = Join-Path $baselineProject "backups\正版最后一次鼠标修改_20260814-191459\手机端\星澜TP0.8.3.deb"
-$pluginPackages = Join-Path (Split-Path $projectRoot -Parent) "星澜_手机端3种插件_20260730_滑屏0.2秒"
-$trollVncSource = Join-Path (Split-Path $projectRoot -Parent) "github-mirror-tests\TrollVNC"
+$integratedPackage = Join-Path $projectRoot "phone\packages\星澜TP-TrollVNC静默整合版_RootHide_0.9.0.deb"
 $mainName = "星澜"
 $releaseName = "星澜_TrollVNC触控版"
 
@@ -46,11 +44,8 @@ if (-not (Test-Path -LiteralPath $usbmuxTools -PathType Container)) {
 if (-not (Test-Path -LiteralPath $configSource -PathType Leaf)) {
     throw "缺少正式版手机分组配置: $configSource"
 }
-if (-not (Test-Path -LiteralPath $projectionPackage -PathType Leaf)) {
-    throw "缺少正式版 XLStream 投屏插件: $projectionPackage"
-}
-if (-not (Test-Path -LiteralPath $pluginPackages -PathType Container)) {
-    throw "缺少 TrollVNC 手机插件目录: $pluginPackages"
+if (-not (Test-Path -LiteralPath $integratedPackage -PathType Leaf)) {
+    throw "缺少 RootHide 手机端整合插件: $integratedPackage"
 }
 
 New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
@@ -112,14 +107,9 @@ Copy-Item -LiteralPath (Join-Path $usbmuxTools "idevice_id.exe") -Destination $m
 Copy-Item -LiteralPath (Join-Path $usbmuxTools "iproxy.exe") -Destination $muxTarget -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "TrollVNC触控使用说明.txt") -Destination $mainFolder -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "CURRENT_TROLLVNC_RELEASE") -Destination $mainFolder -Force
-$projectionTarget = Join-Path $mainFolder "手机端_投屏插件"
-New-Item -ItemType Directory -Path $projectionTarget -Force | Out-Null
-Copy-Item -LiteralPath $projectionPackage -Destination $projectionTarget -Force
-$pluginTarget = Join-Path $mainFolder "手机端_TrollVNC插件"
-New-Item -ItemType Directory -Path $pluginTarget -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $pluginPackages "2_TrollVNC静默_普通越狱版.deb") -Destination $pluginTarget -Force
-Copy-Item -LiteralPath (Join-Path $pluginPackages "2_TrollVNC静默_RootHide版.deb") -Destination $pluginTarget -Force
-Copy-Item -LiteralPath (Join-Path $trollVncSource "COPYING") -Destination (Join-Path $pluginTarget "TrollVNC_GPLv2_LICENSE.txt") -Force
+$phoneTarget = Join-Path $mainFolder "手机端_RootHide整合插件"
+New-Item -ItemType Directory -Path $phoneTarget -Force | Out-Null
+Copy-Item -LiteralPath $integratedPackage -Destination $phoneTarget -Force
 
 $finalFolder = Join-Path $releaseRoot $releaseName
 Remove-GeneratedPath -Path $finalFolder -AllowedRoot $releaseRoot

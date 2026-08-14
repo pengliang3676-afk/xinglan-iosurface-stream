@@ -9,38 +9,8 @@ typedef CFTypeRef IOHIDEventSystemClientRef;
 
 typedef IOHIDEventSystemClientRef (*XLClientCreateFn)(CFAllocatorRef);
 typedef void (*XLDispatchEventFn)(IOHIDEventSystemClientRef, IOHIDEventRef);
-typedef void (*XLAppendEventFn)(IOHIDEventRef, IOHIDEventRef, uint32_t);
 typedef void (*XLSetIntegerValueFn)(IOHIDEventRef, uint32_t, CFIndex);
-typedef void (*XLSetFloatValueFn)(IOHIDEventRef, uint32_t, double);
 typedef void (*XLSetSenderIDFn)(IOHIDEventRef, uint64_t);
-typedef IOHIDEventRef (*XLDigitizerEventFn)(CFAllocatorRef,
-                                            uint64_t,
-                                            uint32_t,
-                                            uint32_t,
-                                            uint32_t,
-                                            uint32_t,
-                                            uint32_t,
-                                            double,
-                                            double,
-                                            double,
-                                            double,
-                                            double,
-                                            bool,
-                                            bool,
-                                            uint32_t);
-typedef IOHIDEventRef (*XLFingerEventFn)(CFAllocatorRef,
-                                        uint64_t,
-                                        uint32_t,
-                                        uint32_t,
-                                        uint32_t,
-                                        double,
-                                        double,
-                                        double,
-                                        double,
-                                        double,
-                                        bool,
-                                        bool,
-                                        uint32_t);
 typedef IOHIDEventRef (*XLKeyboardEventFn)(CFAllocatorRef,
                                           uint64_t,
                                           uint32_t,
@@ -54,45 +24,17 @@ typedef IOHIDEventRef (*XLUnicodeEventFn)(CFAllocatorRef,
                                          uint32_t,
                                          uint32_t);
 
-static const uint32_t XLDigitizerEventTouch = 1u << 1;
-static const uint32_t XLDigitizerEventPosition = 1u << 2;
-static const uint32_t XLDigitizerEventIdentity = 1u << 5;
-static const uint32_t XLDigitizerEventAttribute = 1u << 6;
-static const uint32_t XLDigitizerEventCancel = 1u << 7;
-static const uint32_t XLDigitizerMajorRadius = 0xB0014;
-static const uint32_t XLDigitizerMinorRadius = 0xB0015;
-static const uint32_t XLDigitizerIsDisplayIntegrated = 0xB0019;
-// These are the private digitizer fields used by the iOS HID dispatcher.
-// A parent (hand) event must advertise its child collection explicitly;
-// otherwise IOHIDEventSystemClientDispatchEvent can accept the event while
-// SpringBoard silently ignores it.
 static const uint32_t XLEventFieldIsBuiltIn = 0x00000004;
 static const uint32_t XLUnicodeEncodingUTF16LE = 1;
-// Known-good synthetic sender id used by TrollVNC/iOS HID generators on
-// iOS 14.8 through current releases. Without a sender id SpringBoard may
-// silently discard an otherwise valid dispatched event.
+// Stable sender metadata for keyboard and Unicode events.
 static const uint64_t XLSyntheticSenderID = 0x8000000817319372ULL;
-
-// Use the same stable finger identifiers as TrollVNC/STHIDEventGenerator.
-static uint32_t XLTouchIdentifierForFinger(uint8_t finger) {
-    static const uint32_t identifiers[] = {
-        2, 3, 4, 5, 1, 6, 7, 8, 9, 10,
-    };
-    return finger < (sizeof(identifiers) / sizeof(identifiers[0]))
-        ? identifiers[finger]
-        : (uint32_t)finger + 1;
-}
 
 @implementation XLHIDSender {
     void *_ioKitHandle;
     IOHIDEventSystemClientRef _client;
     XLDispatchEventFn _dispatchEvent;
-    XLAppendEventFn _appendEvent;
     XLSetIntegerValueFn _setIntegerValue;
-    XLSetFloatValueFn _setFloatValue;
     XLSetSenderIDFn _setSenderID;
-    XLDigitizerEventFn _createDigitizerEvent;
-    XLFingerEventFn _createFingerEvent;
     XLKeyboardEventFn _createKeyboardEvent;
     XLUnicodeEventFn _createUnicodeEvent;
 }
@@ -107,15 +49,9 @@ static uint32_t XLTouchIdentifierForFinger(uint8_t finger) {
         (XLClientCreateFn)dlsym(_ioKitHandle, "IOHIDEventSystemClientCreate");
     _dispatchEvent =
         (XLDispatchEventFn)dlsym(_ioKitHandle, "IOHIDEventSystemClientDispatchEvent");
-    _appendEvent = (XLAppendEventFn)dlsym(_ioKitHandle, "IOHIDEventAppendEvent");
     _setIntegerValue =
         (XLSetIntegerValueFn)dlsym(_ioKitHandle, "IOHIDEventSetIntegerValue");
-    _setFloatValue = (XLSetFloatValueFn)dlsym(_ioKitHandle, "IOHIDEventSetFloatValue");
     _setSenderID = (XLSetSenderIDFn)dlsym(_ioKitHandle, "IOHIDEventSetSenderID");
-    _createDigitizerEvent =
-        (XLDigitizerEventFn)dlsym(_ioKitHandle, "IOHIDEventCreateDigitizerEvent");
-    _createFingerEvent =
-        (XLFingerEventFn)dlsym(_ioKitHandle, "IOHIDEventCreateDigitizerFingerEvent");
     _createKeyboardEvent =
         (XLKeyboardEventFn)dlsym(_ioKitHandle, "IOHIDEventCreateKeyboardEvent");
     _createUnicodeEvent =
@@ -130,89 +66,7 @@ static uint32_t XLTouchIdentifierForFinger(uint8_t finger) {
 }
 
 - (BOOL)isReady {
-    return _client && _dispatchEvent && _appendEvent && _setIntegerValue &&
-        _setFloatValue && _setSenderID && _createDigitizerEvent && _createFingerEvent;
-}
-
-- (BOOL)sendTouchPhase:(XLTouchPhase)phase
-                 finger:(uint8_t)finger
-                      x:(double)x
-                      y:(double)y
-               pressure:(double)pressure {
-    if (!self.ready) return NO;
-    x = MAX(0.0, MIN(1.0, x));
-    y = MAX(0.0, MIN(1.0, y));
-    pressure = MAX(0.0, MIN(1.0, pressure));
-
-    BOOL touching = phase == XLTouchPhaseDown || phase == XLTouchPhaseMove;
-    uint32_t eventMask = 0;
-    switch (phase) {
-        case XLTouchPhaseDown:
-            eventMask = XLDigitizerEventTouch | XLDigitizerEventIdentity;
-            break;
-        case XLTouchPhaseMove:
-            eventMask = XLDigitizerEventPosition | XLDigitizerEventAttribute;
-            break;
-        case XLTouchPhaseUp:
-            eventMask = XLDigitizerEventTouch | XLDigitizerEventIdentity;
-            break;
-        case XLTouchPhaseCancel:
-            eventMask = XLDigitizerEventTouch | XLDigitizerEventIdentity |
-                XLDigitizerEventCancel;
-            break;
-    }
-    uint64_t timestamp = mach_absolute_time();
-    uint32_t identifier = XLTouchIdentifierForFinger(finger);
-    (void)pressure;
-    double pathPressure = 0.0;
-    double pathRadius = touching ? 5.0 : 0.0;
-
-    IOHIDEventRef parent = _createDigitizerEvent(kCFAllocatorDefault,
-                                                  timestamp,
-                                                  3,
-                                                  0,
-                                                  0,
-                                                  eventMask,
-                                                  0,
-                                                  0,
-                                                  0.0,
-                                                  0.0,
-                                                  0.0,
-                                                  0.0,
-                                                  false,
-                                                  touching,
-                                                  0);
-    IOHIDEventRef child = _createFingerEvent(kCFAllocatorDefault,
-                                              timestamp,
-                                              identifier,
-                                              identifier,
-                                              eventMask,
-                                              x,
-                                              y,
-                                              0.0,
-                                              pathPressure,
-                                              90.0,
-                                              touching,
-                                              touching,
-                                              0);
-    if (!parent || !child) {
-        if (parent) CFRelease(parent);
-        if (child) CFRelease(child);
-        return NO;
-    }
-    // Mark the collection as an integrated built-in display touch source.
-    // These fields are the important difference from a merely well-formed
-    // digitizer event: SpringBoard filters out events without them.
-    _setIntegerValue(parent, XLDigitizerIsDisplayIntegrated, 1);
-    _setIntegerValue(parent, XLEventFieldIsBuiltIn, 1);
-    _setFloatValue(child, XLDigitizerMajorRadius, pathRadius);
-    _setFloatValue(child, XLDigitizerMinorRadius, pathRadius);
-    _appendEvent(parent, child, 0);
-    _setSenderID(parent, XLSyntheticSenderID);
-    _dispatchEvent(_client, parent);
-    CFRelease(child);
-    CFRelease(parent);
-    return YES;
+    return _client && _dispatchEvent && _setSenderID && _createKeyboardEvent;
 }
 
 - (BOOL)sendKeyboardPage:(uint32_t)page usage:(uint32_t)usage down:(BOOL)isDown {
@@ -281,7 +135,7 @@ static uint32_t XLTouchIdentifierForFinger(uint8_t finger) {
                                                0);
     if (!event) return NO;
     // Mark the synthetic event as originating from the built-in input source.
-    // This is the same metadata used by the proven touch/keyboard path.
+    // Mark the event as a built-in input source before dispatch.
     _setIntegerValue(event, XLEventFieldIsBuiltIn, 1);
     _setSenderID(event, XLSyntheticSenderID);
     _dispatchEvent(_client, event);

@@ -33,8 +33,14 @@ class PhonePackageSafetyTests(unittest.TestCase):
     def test_safe_package_identity_replaces_legacy_package_without_conflict(self) -> None:
         fields = read_control()
         self.assertEqual("com.jibeib.xlstream.safe", fields["Package"])
-        self.assertEqual("com.jibeib.xlstream", fields["Provides"])
-        self.assertEqual("com.jibeib.xlstream", fields["Replaces"])
+        self.assertEqual("0.9.0", fields["Version"])
+        self.assertEqual("iphoneos-arm64e", fields["Architecture"])
+        self.assertEqual(
+            "com.jibeib.xlstream, com.82flex.trollvnc", fields["Provides"]
+        )
+        self.assertEqual(
+            "com.jibeib.xlstream, com.82flex.trollvnc", fields["Replaces"]
+        )
         self.assertNotIn("Conflicts", fields)
         self.assertNotIn("Breaks", fields)
 
@@ -80,9 +86,14 @@ class PhonePackageSafetyTests(unittest.TestCase):
             self.assertIn(icon_name, info["CFBundleIconFiles"])
             self.assertTrue((info_path.parent / icon_name).is_file())
 
-    def test_package_uses_xlstream_hid_without_ioscpy_runtime(self) -> None:
+    def test_package_keeps_keyboard_hid_but_removes_native_touch_runtime(self) -> None:
         makefile = (PHONE / "Makefile").read_text(encoding="utf-8")
+        sender = (PHONE / "XLHIDSender.mm").read_text(encoding="utf-8")
         self.assertIn("XLHIDSender.mm", makefile)
+        self.assertIn("IOHIDEventCreateKeyboardEvent", sender)
+        self.assertNotIn("sendTouchPhase", sender)
+        self.assertNotIn("IOHIDEventCreateDigitizerEvent", sender)
+        self.assertNotIn("IOHIDEventCreateDigitizerFingerEvent", sender)
         self.assertNotIn("xltouchd", makefile)
         self.assertNotIn("XLTouchActions", makefile)
         ioscpy_root = PHONE / "vendor" / "ioscpy"

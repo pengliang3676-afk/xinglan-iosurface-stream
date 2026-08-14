@@ -17,8 +17,6 @@ from xinglan.control_protocol import (
     KeyModifier,
     MessageType,
     SystemAction,
-    TouchCommand,
-    TouchPhase,
     pack_hello,
     pack_header,
     pack_keyframe_request,
@@ -26,11 +24,9 @@ from xinglan.control_protocol import (
     pack_message,
     pack_system_action,
     pack_text_input,
-    pack_touch,
     unpack_ack,
     unpack_header,
     unpack_hello,
-    unpack_touch,
 )
 
 
@@ -43,18 +39,6 @@ class ControlProtocolTests(unittest.TestCase):
         self.assertEqual((MessageType.PING, 8, 77), (
             header.message_type, header.payload_length, header.sequence
         ))
-
-    def test_touch_round_trip_and_clamp(self) -> None:
-        packet = pack_touch(
-            TouchCommand(TouchPhase.MOVE, 1, -0.5, 1.5, 0.4, 12345),
-            sequence=9,
-        )
-        header = unpack_header(packet[:HEADER.size], CONTROL_MAGIC)
-        touch = unpack_touch(packet[HEADER.size:])
-        self.assertEqual(MessageType.TOUCH, header.message_type)
-        self.assertEqual(12, header.payload_length)
-        self.assertEqual((0.0, 1.0), (touch.x, touch.y))
-        self.assertAlmostEqual(0.4, touch.pressure, places=4)
 
     def test_rejects_wrong_magic(self) -> None:
         encoded = pack_header(CONTROL_MAGIC, MessageType.PING, 0, 1)

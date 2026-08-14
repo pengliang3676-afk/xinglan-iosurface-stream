@@ -1,1 +1,5 @@
-This marker identifies the single adopted TrollVNC release.
+星澜TP 0.9.0 + TrollVNC静默整合版
+仅支持 Dopamine RootHide（iphoneos-arm64e）
+手机端唯一安装包：手机端_RootHide整合插件\星澜TP-TrollVNC静默整合版_RootHide_0.9.0.deb
+已安装星澜TP 0.8.3 可直接覆盖升级，安装后 Respring。
+不再分发普通越狱版、独立 TrollVNC 包或旧的星澜原生鼠标触控版本。

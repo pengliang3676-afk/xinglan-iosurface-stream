@@ -18,7 +18,6 @@ from xinglan.protocol import (
     parse_video_header,
     parse_video_header_v3,
     parse_video_packet_header,
-    touch_message,
 )
 from xinglan.diagnostics import ProcessLoadSampler, working_set_mb
 from xinglan.session import DeviceSession, LatestFrame, prepare_xlv3_image
@@ -48,13 +47,6 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(1024, parse_frame_size(b"\x00\x00\x04\x00"))
         with self.assertRaises(ValueError):
             parse_frame_size(b"\x00\x00\x00\x00")
-
-    def test_touch_message(self) -> None:
-        self.assertEqual(b"1011010375006670\r\n", touch_message(1, 0.5, 0.5))
-
-    def test_touch_coordinates_are_clamped(self) -> None:
-        self.assertEqual(b"1010010000000000\r\n", touch_message(0, -5, -2))
-        self.assertEqual(b"1012010749013330\r\n", touch_message(2, 8, 9))
 
     def test_latest_frame_overwrites_without_queue(self) -> None:
         slot = LatestFrame()

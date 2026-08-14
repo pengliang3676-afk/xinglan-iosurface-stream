@@ -10,8 +10,6 @@ VIDEO_HEADER_SIZE = 12
 VIDEO_HEADER_V3_SIZE = 16
 VIDEO_PACKET_HEADER_SIZE = 16
 MAX_ENCODED_FRAME = 4 * 1024 * 1024
-NATIVE_WIDTH = 750
-NATIVE_HEIGHT = 1334
 
 
 @dataclass(frozen=True)
@@ -78,14 +76,3 @@ def parse_frame_size(data: bytes) -> int:
     if value <= 0 or value > MAX_ENCODED_FRAME:
         raise ValueError(f"异常视频帧长度：{value}")
     return value
-
-
-def touch_message(kind: int, normalized_x: float, normalized_y: float) -> bytes:
-    """把画面相对坐标转换为手机端现有触摸协议。"""
-    if kind not in (0, 1, 2):
-        raise ValueError("触摸类型只能是抬起、按下或移动")
-    nx = min(1.0, max(0.0, float(normalized_x)))
-    ny = min(1.0, max(0.0, float(normalized_y)))
-    x = min(NATIVE_WIDTH - 1, int(nx * NATIVE_WIDTH))
-    y = min(NATIVE_HEIGHT - 1, int(ny * NATIVE_HEIGHT))
-    return f"101{kind}01{x * 10:05d}{y * 10:05d}\r\n".encode("ascii")

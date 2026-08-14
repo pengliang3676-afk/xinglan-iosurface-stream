@@ -84,33 +84,16 @@ static BOOL XLWriteAck(int client, uint32_t sequence, uint32_t resultCode) {
 static BOOL XLWriteHelloAck(int client, uint32_t sequence) {
     XLHelloPayload payload = {};
     payload.capabilities = htonl(XLCapabilityVideoH264 |
-                                 XLCapabilityTouch |
                                  XLCapabilitySystemActions |
                                  XLCapabilityStatus |
                                  XLCapabilityKeyframeRequest |
                                  XLCapabilityFileTransfer |
-                                 XLCapabilityTextInput |
-                                 XLCapabilityTouchStream);
+                                 XLCapabilityTextInput);
     payload.screenWidth = htons(XLVideoWidth);
     payload.screenHeight = htons(XLVideoHeight);
     payload.protocolVersion = htons(XLProtocolVersion);
     return XLWriteControlMessage(
         client, XLMessageHelloAck, sequence, &payload, sizeof(payload));
-}
-
-static uint32_t XLHandleTouch(XLHIDSender *sender, const NSData *data) {
-    if (data.length != sizeof(XLTouchPayload)) return 2;
-    XLTouchPayload payload = {};
-    [data getBytes:&payload length:sizeof(payload)];
-    if (payload.phase > XLTouchPhaseCancel) return 3;
-    double x = ntohs(payload.x) / 65535.0;
-    double y = ntohs(payload.y) / 65535.0;
-    double pressure = ntohs(payload.pressure) / 65535.0;
-    return [sender sendTouchPhase:(XLTouchPhase)payload.phase
-                           finger:payload.finger
-                                x:x
-                                y:y
-                         pressure:pressure] ? 0 : 4;
 }
 
 static uint32_t XLHandleTextInput(XLHIDSender *sender, const NSData *data) {
@@ -280,20 +263,6 @@ static void XLHandleControlClient(int client) {
                 case XLMessageHello:
                     if (!XLWriteHelloAck(client, sequence)) return;
                     break;
-                case XLMessageTouch: {
-                    uint32_t result = XLHandleTouch(sender, payload);
-                    if (result != 0) XLControlErrors.fetch_add(1);
-                    if (!XLWriteAck(client, sequence, result)) return;
-                    break;
-                }
-                case XLMessageTouchStream: {
-                    // MOVE is an absolute latest position, not a transaction.
-                    // No ACK means USB latency cannot replay old cursor points
-                    // after the user has already released the mouse button.
-                    uint32_t result = XLHandleTouch(sender, payload);
-                    if (result != 0) XLControlErrors.fetch_add(1);
-                    break;
-                }
                 case XLMessageSystemAction: {
                     uint32_t result = XLHandleSystemAction(sender, payload, sequence);
                     if (result != 0) XLControlErrors.fetch_add(1);

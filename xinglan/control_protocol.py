@@ -15,7 +15,6 @@ MAX_PAYLOAD = 1024 * 1024
 
 HEADER = struct.Struct("!4sBBHII")
 HELLO = struct.Struct("!IHHHH")
-TOUCH = struct.Struct("!BBHHHI")
 SYSTEM_ACTION = struct.Struct("!HH")
 PING = struct.Struct("!Q")
 ACK = struct.Struct("!II")
@@ -25,7 +24,6 @@ DEVICE_STATUS = struct.Struct("!IHHHHII")
 class MessageType(enum.IntEnum):
     HELLO = 1
     HELLO_ACK = 2
-    TOUCH = 10
     SYSTEM_ACTION = 11
     REQUEST_KEYFRAME = 12
     TEXT_INPUT = 13
@@ -36,13 +34,6 @@ class MessageType(enum.IntEnum):
     ERROR = 23
     DEVICE_STATUS = 30
     VIDEO_STATS = 31
-
-
-class TouchPhase(enum.IntEnum):
-    UP = 0
-    DOWN = 1
-    MOVE = 2
-    CANCEL = 3
 
 
 @dataclass(frozen=True)
@@ -76,16 +67,6 @@ class MessageHeader:
     flags: int
     payload_length: int
     sequence: int
-
-
-@dataclass(frozen=True)
-class TouchCommand:
-    phase: TouchPhase
-    finger: int
-    x: float
-    y: float
-    pressure: float
-    timestamp_ms: int
 
 
 @dataclass(frozen=True)
@@ -189,22 +170,6 @@ def unpack_hello(payload: bytes) -> Hello:
     return Hello(capabilities, width, height, version)
 
 
-def _unit_to_u16(value: float) -> int:
-    return round(max(0.0, min(1.0, value)) * 65535.0)
-
-
-def pack_touch(command: TouchCommand, sequence: int) -> bytes:
-    payload = TOUCH.pack(
-        int(command.phase),
-        command.finger & 0xFF,
-        _unit_to_u16(command.x),
-        _unit_to_u16(command.y),
-        _unit_to_u16(command.pressure),
-        command.timestamp_ms & 0xFFFFFFFF,
-    )
-    return pack_message(CONTROL_MAGIC, MessageType.TOUCH, sequence, payload)
-
-
 def pack_system_action(action: SystemAction, sequence: int) -> bytes:
     return pack_message(
         CONTROL_MAGIC,
@@ -237,20 +202,6 @@ def pack_key_event(command: KeyCommand, sequence: int) -> bytes:
         sequence,
         payload,
         flags=command.modifiers,
-    )
-
-
-def unpack_touch(payload: bytes) -> TouchCommand:
-    if len(payload) != TOUCH.size:
-        raise ValueError(f"invalid touch payload length: {len(payload)}")
-    phase, finger, x, y, pressure, timestamp_ms = TOUCH.unpack(payload)
-    return TouchCommand(
-        TouchPhase(phase),
-        finger,
-        x / 65535.0,
-        y / 65535.0,
-        pressure / 65535.0,
-        timestamp_ms,
     )
 
 

@@ -32,8 +32,6 @@
     <true/>
     <key>com.apple.hid.manager.user-access</key>
     <true/>
-    <key>com.apple.hid.multitouch.user-access</key>
-    <true/>
     <key>com.apple.hid.system.user-access-service</key>
     <true/>
     <key>com.apple.private.hid.manager.client</key>

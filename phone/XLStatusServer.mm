@@ -67,7 +67,6 @@ static void XLHandleStatusClient(int client) {
 
         XLHelloPayload hello = {};
         hello.capabilities = htonl(XLCapabilityVideoH264 |
-                                   XLCapabilityTouch |
                                    XLCapabilitySystemActions |
                                    XLCapabilityStatus |
                                    XLCapabilityKeyframeRequest |

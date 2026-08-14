@@ -27,15 +27,12 @@ from .control_protocol import (  # noqa: E402
     MessageType,
     KeyCommand,
     SystemAction,
-    TouchCommand,
-    TouchPhase,
     pack_hello,
     pack_keyframe_request,
     pack_key_event,
     pack_ping,
     pack_system_action,
     pack_text_input,
-    pack_touch,
     unpack_ack,
     unpack_device_status,
     unpack_header,
@@ -227,9 +224,7 @@ class DeviceSession:
         return not self._thread.is_alive()
 
     def send_touch(self, kind: int, normalized_x: float, normalized_y: float) -> bool:
-        # The experimental build deliberately bypasses XLControl TOUCH and
-        # TOUCH_STREAM.  Only TrollVNC's ordinary RFB left-button lifecycle is
-        # accepted; the previous CANCEL anti-fling experiment is not used.
+        # Mouse input uses only TrollVNC's ordinary RFB left-button lifecycle.
         if kind not in (TOUCH_UP, TOUCH_DOWN, TOUCH_MOVE):
             return False
         if not math.isfinite(normalized_x) or not math.isfinite(normalized_y):
@@ -285,23 +280,7 @@ class DeviceSession:
 
         def enqueue_latest() -> None:
             if queue.full():
-                retained: list[ControlEnvelope] = []
-                removed_move = False
-                while not queue.empty():
-                    queued = queue.get_nowait()
-                    if (
-                        not removed_move
-                        and queued.kind == "touch"
-                        and isinstance(queued.value, TouchCommand)
-                        and queued.value.phase == TouchPhase.MOVE
-                    ):
-                        removed_move = True
-                        continue
-                    retained.append(queued)
-                if not removed_move and retained:
-                    retained.pop(0)
-                for queued in retained[-(queue.maxsize - 1):]:
-                    queue.put_nowait(queued)
+                queue.get_nowait()
             try:
                 queue.put_nowait(envelope)
             except asyncio.QueueFull:
@@ -546,9 +525,7 @@ class DeviceSession:
 
     async def _send_control_envelope(self, connection: Any, envelope: ControlEnvelope) -> None:
         sequence = self._next_sequence()
-        if envelope.kind == "touch" and isinstance(envelope.value, TouchCommand):
-            packet = pack_touch(envelope.value, sequence)
-        elif envelope.kind == "system" and isinstance(envelope.value, SystemAction):
+        if envelope.kind == "system" and isinstance(envelope.value, SystemAction):
             packet = pack_system_action(envelope.value, sequence)
         elif envelope.kind == "text" and isinstance(envelope.value, str):
             packet = pack_text_input(envelope.value, sequence)
