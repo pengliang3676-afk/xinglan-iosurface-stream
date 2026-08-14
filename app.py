@@ -980,7 +980,7 @@ class XinglanApp:
         self.music_track_index = 0
         self.music_playing = False
         self._music_after_id: str | None = None
-        root.title("星澜 · TrollVNC触控版")
+        root.title("星澜")
         try:
             root.iconbitmap(default=str(PROJECT_DIR / "assets" / "xinglan.ico"))
         except tk.TclError:
