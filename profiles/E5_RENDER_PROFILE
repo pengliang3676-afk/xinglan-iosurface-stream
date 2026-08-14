@@ -1,0 +1,2 @@
+Dual-socket Xeon E5 tile rendering profile.
+Small phone tiles use bilinear scaling; the master view keeps Lanczos scaling.

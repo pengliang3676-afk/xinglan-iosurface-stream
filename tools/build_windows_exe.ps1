@@ -1,7 +1,8 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
     [string]$PythonExe,
-    [switch]$ConsoleMain
+    [switch]$ConsoleMain,
+    [switch]$E5Optimized
 )
 
 # Windows PowerShell 5.1 requires a BOM to parse Chinese string literals.
@@ -14,8 +15,8 @@ $usbmuxTools = Join-Path (Split-Path $projectRoot -Parent) "independent-usbmux-t
 $baselineProject = Join-Path (Split-Path $projectRoot -Parent) "星澜_USB原生群控_新版"
 $configSource = Join-Path $baselineProject "config\device_groups.json"
 $integratedPackage = Join-Path $projectRoot "phone\packages\星澜TP-TrollVNC静默整合版_RootHide_0.9.0.deb"
-$mainName = "星澜"
-$releaseName = "星澜_TrollVNC触控版"
+$mainName = if ($E5Optimized) { "星澜_双路E5" } else { "星澜" }
+$releaseName = if ($E5Optimized) { "星澜_双路E5优化版" } else { "星澜_TrollVNC触控版" }
 
 function Remove-GeneratedPath {
     param(
@@ -95,6 +96,9 @@ if ($LASTEXITCODE -ne 0) { throw "输入助手构建失败" }
 $mainFolder = Join-Path $distRoot $mainName
 Copy-Item -LiteralPath (Join-Path $distRoot "星澜输入.exe") -Destination $mainFolder -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "assets") -Destination $mainFolder -Recurse -Force
+if ($E5Optimized) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot "profiles\E5_RENDER_PROFILE") -Destination $mainFolder -Force
+}
 $configTarget = Join-Path $mainFolder "config"
 New-Item -ItemType Directory -Path $configTarget -Force | Out-Null
 Copy-Item -LiteralPath $configSource -Destination $configTarget -Force

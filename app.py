@@ -75,6 +75,12 @@ TILE_NUMBER_FONT_SIZE = 12
 MAIN_BUTTON_FONT = ("Microsoft YaHei UI", 10, "bold")
 WALL_GAP = 3
 DISPLAY_INTERVAL_MS = 40
+E5_RENDER_PROFILE = (PROJECT_DIR / "E5_RENDER_PROFILE").is_file()
+TILE_RESAMPLING = (
+    Image.Resampling.BILINEAR
+    if E5_RENDER_PROFILE
+    else Image.Resampling.LANCZOS
+)
 LOGGER = logging.getLogger("xinglan.app")
 
 
@@ -606,7 +612,7 @@ class DeviceTile:
         # 小窗口优先填满卡片画布，避免手机画面与右侧操作栏之间留下黑边。
         target_size = (canvas_width, canvas_height)
         resized = image if image.size == target_size else image.resize(
-            target_size, Image.Resampling.LANCZOS
+            target_size, TILE_RESAMPLING
         )
         self.image_bounds = (0, 0, canvas_width, canvas_height)
         self._set_photo(resized)
