@@ -5,6 +5,10 @@
 
 #include <dlfcn.h>
 #include <spawn.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -95,6 +99,64 @@ static void XLStartStreamServiceAfterSpringBoard(void) {
                                      environ);
             posix_spawnattr_destroy(&attributes);
             NSLog(@"[XLSystemActions] launcher start result=%d pid=%d",
+                  result,
+                  process);
+        });
+    });
+}
+
+static BOOL XLPortIsListening(uint16_t port) {
+    int descriptor = socket(AF_INET, SOCK_STREAM, 0);
+    if (descriptor < 0) return NO;
+    struct timeval timeout = {0, 150000};
+    setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    struct sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    BOOL listening = connect(descriptor,
+                             reinterpret_cast<struct sockaddr *>(&address),
+                             sizeof(address)) == 0;
+    close(descriptor);
+    return listening;
+}
+
+static void XLStartTrollVNCServiceAfterSpringBoard(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500000000LL),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            if (XLPortIsListening(5901)) return;
+            const char *server = "/usr/bin/trollvncserver";
+            if (access(server, X_OK) != 0) {
+                NSLog(@"[XLSystemActions] TrollVNC unavailable: %s", server);
+                return;
+            }
+
+            posix_spawnattr_t attributes;
+            int attrResult = posix_spawnattr_init(&attributes);
+            if (attrResult != 0) {
+                NSLog(@"[XLSystemActions] TrollVNC spawn attributes failed: %d",
+                      attrResult);
+                return;
+            }
+            XLConfigureRootPersona(&attributes);
+
+            pid_t process = -1;
+            char *const arguments[] = {
+                const_cast<char *>(server),
+                const_cast<char *>("-daemon"),
+                nullptr,
+            };
+            int result = posix_spawn(&process,
+                                     server,
+                                     nullptr,
+                                     &attributes,
+                                     arguments,
+                                     environ);
+            posix_spawnattr_destroy(&attributes);
+            NSLog(@"[XLSystemActions] TrollVNC start result=%d pid=%d",
                   result,
                   process);
         });
@@ -469,6 +531,7 @@ static void XLRegisterSpringBoardActions(void) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 XLRegisterSpringBoardActions();
                 XLStartStreamServiceAfterSpringBoard();
+                XLStartTrollVNCServiceAfterSpringBoard();
             });
         } else {
             static XLTextInputReceiver *receiver;

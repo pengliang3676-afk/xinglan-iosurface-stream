@@ -70,6 +70,11 @@ class PhonePackageSafetyTests(unittest.TestCase):
         self.assertIn("XLServiceIsAlreadyRunning", launcher)
         self.assertIn("XLPortIsListening(6203)", launcher)
 
+        self.assertIn("XLStartTrollVNCServiceAfterSpringBoard", actions)
+        self.assertIn('const char *server = "/usr/bin/trollvncserver"', actions)
+        self.assertIn("XLPortIsListening(5901)", actions)
+        self.assertIn('const_cast<char *>("-daemon")', actions)
+
         daemon = (PHONE / "main.mm").read_text(encoding="utf-8")
         self.assertIn("XLAcquireServiceLock", daemon)
         self.assertIn(".xlstream-service.lock", daemon)
