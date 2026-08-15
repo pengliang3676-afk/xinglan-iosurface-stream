@@ -43,25 +43,33 @@ class NativeImeWorkerTests(unittest.TestCase):
         self.assertIn("args.anchor_x", source)
         self.assertIn("args.anchor_y", source)
 
-    def test_native_worker_owns_edit_and_does_not_move_ime_windows(self) -> None:
+    def test_native_worker_uses_real_rich_edit_tsf_layout(self) -> None:
         source = (
             Path(__file__).resolve().parents[1] / "xinglan" / "native_ime_worker.py"
         ).read_text(encoding="utf-8")
-        self.assertIn('"EDIT"', source)
+        self.assertIn('RICH_EDIT_CLASS_NAME = "RICHEDIT50W"', source)
+        self.assertIn('LoadLibraryW("Msftedit.dll")', source)
+        self.assertIn("EM_SETEDITSTYLE", source)
+        self.assertIn("SES_USECTF", source)
+        self.assertIn("HOST_WIDTH = 2", source)
+        self.assertIn("HOST_HEIGHT = 2", source)
         self.assertIn("WM_IME_STARTCOMPOSITION", source)
         self.assertIn("WM_IME_ENDCOMPOSITION", source)
-        self.assertIn("HOST_ALPHA = 1", source)
-        self.assertIn("SetLayeredWindowAttributes", source)
-        self.assertIn("NotifyWinEvent", source)
+        self.assertIn("GetGUIThreadInfo", source)
+        self.assertIn("ImmGetCandidateWindow", source)
+        self.assertNotIn("WS_EX_LAYERED", source)
+        self.assertNotIn("SetLayeredWindowAttributes", source)
+        self.assertNotIn("NotifyWinEvent", source)
         self.assertNotIn("HideCaret", source)
         self.assertNotIn("SetWinEventHook", source)
         self.assertNotIn("EnumWindows", source)
 
-    @unittest.skipUnless(sys.platform == "win32", "requires Win32 EDIT")
+    @unittest.skipUnless(sys.platform == "win32", "requires Win32 Rich Edit")
     def test_real_native_edit_emits_and_clears_committed_text(self) -> None:
         host = NativeImeHost(800, 700, 0)
         try:
-            host._create_windows()
+            with mock.patch("xinglan.native_ime_worker.emit"):
+                host._create_windows()
             with mock.patch("xinglan.native_ime_worker.emit") as emit:
                 ctypes.windll.user32.SendMessageW(
                     host.edit_hwnd, 0x0102, ord("A"), 0

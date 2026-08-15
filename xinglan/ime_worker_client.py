@@ -179,6 +179,14 @@ class ImeWorkerClient:
                     message[1],
                     message[2],
                 )
+            elif kind == "tsf_style" and len(message) >= 3:
+                LOGGER.info(
+                    "IME Rich Edit TSF enabled=%s style=0x%x",
+                    message[1],
+                    int(message[2]),
+                )
+            elif kind == "ime_geometry" and len(message) >= 2:
+                LOGGER.info("IME native geometry=%s", message[1])
         process = self._process
         if process is not None and process.poll() is not None:
             try:

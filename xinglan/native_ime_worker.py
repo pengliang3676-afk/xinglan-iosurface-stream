@@ -8,9 +8,9 @@ from typing import Any
 
 
 HOST_CLASS_NAME = "XinglanNativeImeHost"
-HOST_WIDTH = 12
-HOST_HEIGHT = 24
-HOST_ALPHA = 1
+RICH_EDIT_CLASS_NAME = "RICHEDIT50W"
+HOST_WIDTH = 2
+HOST_HEIGHT = 2
 FOLLOW_TIMER_MS = 30
 
 WS_POPUP = 0x80000000
@@ -20,18 +20,17 @@ ES_LEFT = 0x0000
 ES_AUTOHSCROLL = 0x0080
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_TOPMOST = 0x00000008
-WS_EX_LAYERED = 0x00080000
 
 SW_SHOW = 5
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
-LWA_ALPHA = 0x00000002
 GWLP_WNDPROC = -4
 GA_ROOT = 2
 
 WM_DESTROY = 0x0002
 WM_SETFOCUS = 0x0007
 WM_CLOSE = 0x0010
+WM_USER = 0x0400
 WM_COMMAND = 0x0111
 WM_TIMER = 0x0113
 WM_KEYDOWN = 0x0100
@@ -47,15 +46,16 @@ VK_RETURN = 0x0D
 EN_CHANGE = 0x0300
 EDIT_CONTROL_ID = 1001
 EM_SETMARGINS = 0x00D3
+EM_SETEVENTMASK = WM_USER + 69
+EM_SETEDITSTYLE = WM_USER + 204
+ENM_CHANGE = 0x00000001
+SES_USECTF = 0x00010000
 EC_LEFTMARGIN = 0x0001
 EC_RIGHTMARGIN = 0x0002
 
 CFS_FORCE_POSITION = 0x0020
 CFS_CANDIDATEPOS = 0x0040
 GCS_COMPSTR = 0x0008
-EVENT_OBJECT_LOCATIONCHANGE = 0x800B
-OBJID_CARET = -8
-CHILDID_SELF = 0
 
 COLOR_WINDOW = 5
 DEFAULT_GUI_FONT = 17
@@ -125,6 +125,20 @@ class MSG(ctypes.Structure):
         ("time", wintypes.DWORD),
         ("pt", POINT),
         ("lPrivate", wintypes.DWORD),
+    ]
+
+
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("hwndActive", wintypes.HWND),
+        ("hwndFocus", wintypes.HWND),
+        ("hwndCapture", wintypes.HWND),
+        ("hwndMenuOwner", wintypes.HWND),
+        ("hwndMoveSize", wintypes.HWND),
+        ("hwndCaret", wintypes.HWND),
+        ("rcCaret", RECT),
     ]
 
 
@@ -213,11 +227,16 @@ class NativeImeHost:
         self.ready_emitted = False
         self.last_position: tuple[int, int] | None = None
         self.background_brush = 0
+        self.msftedit_module = 0
         self._configure_api()
 
     def _configure_api(self) -> None:
         self.kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
         self.kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        self.kernel32.LoadLibraryW.argtypes = [wintypes.LPCWSTR]
+        self.kernel32.LoadLibraryW.restype = wintypes.HMODULE
+        self.kernel32.FreeLibrary.argtypes = [wintypes.HMODULE]
+        self.kernel32.GetCurrentThreadId.restype = wintypes.DWORD
         self.gdi32.CreateSolidBrush.argtypes = [wintypes.COLORREF]
         self.gdi32.CreateSolidBrush.restype = wintypes.HBRUSH
         self.gdi32.GetStockObject.argtypes = [ctypes.c_int]
@@ -280,19 +299,13 @@ class NativeImeHost:
             ctypes.c_int,
             wintypes.UINT,
         ]
-        self.user32.SetLayeredWindowAttributes.argtypes = [
-            wintypes.HWND,
-            wintypes.COLORREF,
-            wintypes.BYTE,
+        self.user32.GetGUIThreadInfo.argtypes = [
             wintypes.DWORD,
+            ctypes.POINTER(GUITHREADINFO),
         ]
-        self.user32.SetCaretPos.argtypes = [ctypes.c_int, ctypes.c_int]
-        self.user32.NotifyWinEvent.argtypes = [
-            wintypes.DWORD,
-            wintypes.HWND,
-            ctypes.c_long,
-            ctypes.c_long,
-        ]
+        self.user32.GetGUIThreadInfo.restype = wintypes.BOOL
+        self.user32.GetFocus.restype = wintypes.HWND
+        self.user32.GetForegroundWindow.restype = wintypes.HWND
         self.user32.SendMessageW.argtypes = [
             wintypes.HWND,
             wintypes.UINT,
@@ -346,6 +359,11 @@ class NativeImeHost:
             wintypes.HANDLE,
             ctypes.POINTER(CANDIDATEFORM),
         ]
+        self.imm32.ImmGetCandidateWindow.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.POINTER(CANDIDATEFORM),
+        ]
 
     def _root_handle(self, handle: int) -> int:
         if not handle:
@@ -378,6 +396,9 @@ class NativeImeHost:
 
     def _create_windows(self) -> None:
         self._register_host_class()
+        self.msftedit_module = int(self.kernel32.LoadLibraryW("Msftedit.dll"))
+        if not self.msftedit_module:
+            raise ctypes.WinError(ctypes.get_last_error())
         x, y = native_host_target(
             self.user32,
             self.anchor_owner_hwnd,
@@ -386,9 +407,12 @@ class NativeImeHost:
             self.fallback_x,
             self.fallback_y,
         )
-        owner = wintypes.HWND(self.owner_hwnd) if self.owner_hwnd else None
+        # Do not establish a cross-process Win32 owner relationship with the
+        # Tk window.  We only use its HWND to follow coordinates/lifetime.  A
+        # standalone helper-owned popup gives Rich Edit and TSF one coherent
+        # GUI thread for focus and text layout.
         host = self.user32.CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
             HOST_CLASS_NAME,
             "",
             WS_POPUP | WS_VISIBLE,
@@ -396,7 +420,7 @@ class NativeImeHost:
             y,
             HOST_WIDTH,
             HOST_HEIGHT,
-            owner,
+            None,
             None,
             wintypes.HINSTANCE(self.instance),
             None,
@@ -405,17 +429,10 @@ class NativeImeHost:
             raise ctypes.WinError(ctypes.get_last_error())
         self.host_hwnd = int(host)
         _HOSTS[self.host_hwnd] = self
-        if not self.user32.SetLayeredWindowAttributes(
-            wintypes.HWND(self.host_hwnd),
-            0,
-            HOST_ALPHA,
-            LWA_ALPHA,
-        ):
-            raise ctypes.WinError(ctypes.get_last_error())
 
         edit = self.user32.CreateWindowExW(
             0,
-            "EDIT",
+            RICH_EDIT_CLASS_NAME,
             "",
             WS_CHILD | WS_VISIBLE | ES_LEFT | ES_AUTOHSCROLL,
             0,
@@ -448,6 +465,21 @@ class NativeImeHost:
             EC_LEFTMARGIN | EC_RIGHTMARGIN,
             0,
         )
+        self.user32.SendMessageW(
+            wintypes.HWND(self.edit_hwnd),
+            EM_SETEVENTMASK,
+            0,
+            ENM_CHANGE,
+        )
+        edit_style = int(
+            self.user32.SendMessageW(
+                wintypes.HWND(self.edit_hwnd),
+                EM_SETEDITSTYLE,
+                SES_USECTF,
+                SES_USECTF,
+            )
+        )
+        emit("tsf_style", bool(edit_style & SES_USECTF), edit_style)
         self.user32.SetTimer(wintypes.HWND(self.host_hwnd), 1, FOLLOW_TIMER_MS, None)
         self.last_position = (x, y)
 
@@ -481,23 +513,7 @@ class NativeImeHost:
             emit("caret_position", target[0], target[1])
         if force_ime:
             self.apply_ime_anchor()
-            self.publish_caret_location()
-
-    def publish_caret_location(self) -> None:
-        """Keep the caret shown to RDP while publishing its new screen rect."""
-
-        if not self.edit_hwnd:
-            return
-        edit = wintypes.HWND(self.edit_hwnd)
-        # The caret remains logically visible; alpha=1 hides its pixels without
-        # removing the location signal consumed by mstsc/local IME handling.
-        self.user32.SetCaretPos(1, 2)
-        self.user32.NotifyWinEvent(
-            EVENT_OBJECT_LOCATIONCHANGE,
-            edit,
-            OBJID_CARET,
-            CHILDID_SELF,
-        )
+            self.emit_ime_geometry()
 
     def apply_ime_anchor(self) -> bool:
         if not self.edit_hwnd:
@@ -509,13 +525,13 @@ class NativeImeHost:
         try:
             composition = COMPOSITIONFORM(
                 CFS_FORCE_POSITION,
-                POINT(1, 2),
+                POINT(0, 0),
                 RECT(0, 0, HOST_WIDTH, HOST_HEIGHT),
             )
             candidate = CANDIDATEFORM(
                 0,
                 CFS_CANDIDATEPOS,
-                POINT(1, HOST_HEIGHT),
+                POINT(0, HOST_HEIGHT),
                 RECT(0, 0, HOST_WIDTH, HOST_HEIGHT),
             )
             composition_ok = bool(
@@ -528,6 +544,63 @@ class NativeImeHost:
         finally:
             self.imm32.ImmReleaseContext(edit, context)
 
+    def emit_ime_geometry(self) -> None:
+        """Report the three coordinate sources used by Rich Edit/TSF/IMM."""
+
+        if not self.edit_hwnd:
+            return
+        edit = wintypes.HWND(self.edit_hwnd)
+        edit_rect = RECT()
+        self.user32.GetWindowRect(edit, ctypes.byref(edit_rect))
+
+        caret_screen: list[int] | None = None
+        gui = GUITHREADINFO()
+        gui.cbSize = ctypes.sizeof(GUITHREADINFO)
+        thread_id = int(self.kernel32.GetCurrentThreadId())
+        if self.user32.GetGUIThreadInfo(thread_id, ctypes.byref(gui)) and gui.hwndCaret:
+            caret_tl = POINT(gui.rcCaret.left, gui.rcCaret.top)
+            caret_br = POINT(gui.rcCaret.right, gui.rcCaret.bottom)
+            if self.user32.ClientToScreen(gui.hwndCaret, ctypes.byref(caret_tl)):
+                self.user32.ClientToScreen(gui.hwndCaret, ctypes.byref(caret_br))
+                caret_screen = [caret_tl.x, caret_tl.y, caret_br.x, caret_br.y]
+
+        candidate_data: dict[str, object] | None = None
+        context = self.imm32.ImmGetContext(edit)
+        if context:
+            try:
+                candidate = CANDIDATEFORM()
+                candidate.dwIndex = 0
+                if self.imm32.ImmGetCandidateWindow(
+                    context, 0, ctypes.byref(candidate)
+                ):
+                    candidate_data = {
+                        "style": int(candidate.dwStyle),
+                        "client": [
+                            int(candidate.ptCurrentPos.x),
+                            int(candidate.ptCurrentPos.y),
+                        ],
+                    }
+            finally:
+                self.imm32.ImmReleaseContext(edit, context)
+
+        emit(
+            "ime_geometry",
+            {
+                "target": list(self.last_position) if self.last_position else None,
+                "edit": [
+                    int(edit_rect.left),
+                    int(edit_rect.top),
+                    int(edit_rect.right),
+                    int(edit_rect.bottom),
+                ],
+                "caret": caret_screen,
+                "candidate": candidate_data,
+                "focus": int(self.user32.GetFocus() or 0),
+                "foreground": int(self.user32.GetForegroundWindow() or 0),
+                "edit_hwnd": self.edit_hwnd,
+            },
+        )
+
     def focus_edit(self) -> None:
         if not self.host_hwnd or not self.edit_hwnd:
             return
@@ -537,7 +610,7 @@ class NativeImeHost:
         self.user32.SetActiveWindow(wintypes.HWND(self.host_hwnd))
         self.user32.SetFocus(wintypes.HWND(self.edit_hwnd))
         self.apply_ime_anchor()
-        self.publish_caret_location()
+        self.emit_ime_geometry()
         if self.last_position is not None:
             emit("caret_position", self.last_position[0], self.last_position[1])
         if not self.ready_emitted:
@@ -594,11 +667,12 @@ class NativeImeHost:
         if message == WM_SETFOCUS:
             result = self._call_original_edit(message, wparam, lparam)
             self.apply_ime_anchor()
-            self.publish_caret_location()
+            self.emit_ime_geometry()
             return result
         if message == WM_IME_STARTCOMPOSITION:
             self.composing = True
             self.apply_ime_anchor()
+            self.emit_ime_geometry()
             return self._call_original_edit(message, wparam, lparam)
         if message == WM_IME_ENDCOMPOSITION:
             result = self._call_original_edit(message, wparam, lparam)
@@ -675,6 +749,9 @@ class NativeImeHost:
         if self.background_brush:
             self.gdi32.DeleteObject(wintypes.HGDIOBJ(self.background_brush))
             self.background_brush = 0
+        if self.msftedit_module:
+            self.kernel32.FreeLibrary(wintypes.HMODULE(self.msftedit_module))
+            self.msftedit_module = 0
 
 
 def run_native_ime_worker(
