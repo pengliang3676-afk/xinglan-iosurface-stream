@@ -11,9 +11,16 @@ from xinglan.ime_position import place_ime_caret
 
 
 IME_WINDOW_ALPHA = 0.0
-ANCHOR_POLL_MS = 50
+ANCHOR_POLL_MS = 250
 CFS_FORCE_POSITION = 0x0020
 CFS_CANDIDATEPOS = 0x0040
+EVENT_OBJECT_DESTROY = 0x8001
+EVENT_OBJECT_SHOW = 0x8002
+EVENT_OBJECT_LOCATIONCHANGE = 0x800B
+OBJID_WINDOW = 0
+OBJID_CLIENT = -4
+WINEVENT_OUTOFCONTEXT = 0x0000
+SWP_NOSIZE_NOZORDER_NOACTIVATE = 0x0015
 
 
 class POINT(ctypes.Structure):
@@ -76,20 +83,67 @@ def visible_window_handles(user32: Any) -> set[int]:
     return handles
 
 
-def move_stuck_candidate_to_bottom_right(
-    user32: Any,
-    baseline_visible: set[int],
-    excluded_handles: set[int],
-) -> list[tuple[int, int, int]]:
-    """Move newly shown, top-left IME panels to a deterministic safe corner."""
+def candidate_target_in_owner(owner: RECT, candidate: RECT) -> tuple[int, int]:
+    """Place the candidate panel inside the Xinglan window's bottom-right."""
 
-    moved: list[tuple[int, int, int]] = []
+    width = max(1, int(candidate.right - candidate.left))
+    height = max(1, int(candidate.bottom - candidate.top))
+    target_x = int(owner.right) - width - 20
+    target_y = int(owner.bottom) - height - 60
+    return max(int(owner.left), target_x), max(int(owner.top), target_y)
+
+
+def root_window_handle(user32: Any, handle: int) -> int:
+    """Normalize child/object HWNDs from WinEvent to their top-level window."""
+
+    if not handle:
+        return 0
     try:
-        screen_width = int(user32.GetSystemMetrics(0))  # SM_CXSCREEN
-        screen_height = int(user32.GetSystemMetrics(1))  # SM_CYSCREEN
-        current = visible_window_handles(user32)
-        user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(RECT)]
-        user32.SetWindowPos.argtypes = [
+        user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        user32.GetAncestor.restype = ctypes.c_void_p
+        ancestor = user32.GetAncestor(ctypes.c_void_p(handle), 2)  # GA_ROOT
+        if ancestor:
+            return int(ancestor)
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        pass
+    return int(handle)
+
+
+class CandidateWindowPinner:
+    """Pin a remote-session IME candidate panel to the Xinglan window."""
+
+    _callback_type = ctypes.WINFUNCTYPE(
+        None,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.c_long,
+        ctypes.c_long,
+        ctypes.c_uint,
+        ctypes.c_uint,
+    )
+
+    def __init__(
+        self,
+        user32: Any,
+        owner_hwnd: int,
+        baseline_visible: set[int],
+        excluded_handles: set[int],
+    ) -> None:
+        self.user32 = user32
+        self.owner_hwnd = root_window_handle(user32, owner_hwnd)
+        self.baseline_visible = {int(handle) for handle in baseline_visible}
+        self.excluded_handles = {int(handle) for handle in excluded_handles}
+        self.pinned_handles: set[int] = set()
+        self._moving_handles: set[int] = set()
+        self._hooks: list[int] = []
+        self._moved_events: list[tuple[int, int, int]] = []
+        self._callback = self._callback_type(self._on_win_event)
+        self._configure_api()
+
+    def _configure_api(self) -> None:
+        self.user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(RECT)]
+        self.user32.SetWindowPos.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_int,
@@ -98,32 +152,161 @@ def move_stuck_candidate_to_bottom_right(
             ctypes.c_int,
             ctypes.c_uint,
         ]
-        for handle in current - baseline_visible - excluded_handles:
-            rect = RECT()
-            native_handle = ctypes.c_void_p(handle)
-            if not user32.GetWindowRect(native_handle, ctypes.byref(rect)):
-                continue
-            if not is_stuck_top_left_candidate(rect):
-                continue
-            width = int(rect.right - rect.left)
-            height = int(rect.bottom - rect.top)
-            target_x = max(0, screen_width - width - 12)
-            target_y = max(0, screen_height - height - 48)
-            # Preserve size, activation and z-order.  Only its screen position
-            # changes, so the IME retains ownership and keyboard behavior.
-            if user32.SetWindowPos(
-                native_handle,
+        self.user32.SetWinEventHook.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            self._callback_type,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+        ]
+        self.user32.SetWinEventHook.restype = ctypes.c_void_p
+
+    def start(self) -> bool:
+        for event in (
+            EVENT_OBJECT_DESTROY,
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_LOCATIONCHANGE,
+        ):
+            hook = self.user32.SetWinEventHook(
+                event,
+                event,
                 None,
-                target_x,
-                target_y,
+                self._callback,
                 0,
                 0,
-                0x0015,  # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                WINEVENT_OUTOFCONTEXT,
+            )
+            if hook:
+                self._hooks.append(int(hook))
+        return bool(self._hooks)
+
+    def close(self) -> None:
+        try:
+            self.user32.UnhookWinEvent.argtypes = [ctypes.c_void_p]
+            for hook in self._hooks:
+                self.user32.UnhookWinEvent(ctypes.c_void_p(hook))
+        except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+            pass
+        self._hooks.clear()
+        self.pinned_handles.clear()
+
+    def add_excluded_handle(self, handle: int) -> None:
+        normalized = root_window_handle(self.user32, handle)
+        if normalized:
+            self.excluded_handles.add(normalized)
+
+    def _read_rect(self, handle: int) -> RECT | None:
+        rect = RECT()
+        if not self.user32.GetWindowRect(ctypes.c_void_p(handle), ctypes.byref(rect)):
+            return None
+        return rect
+
+    def _is_candidate(self, handle: int) -> bool:
+        if (
+            not handle
+            or handle == self.owner_hwnd
+            or handle in self.baseline_visible
+            or handle in self.excluded_handles
+        ):
+            return False
+        try:
+            if not self.user32.IsWindowVisible(ctypes.c_void_p(handle)):
+                return False
+            rect = self._read_rect(handle)
+            return rect is not None and is_stuck_top_left_candidate(rect)
+        except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+            return False
+
+    def _pin_or_enforce(self, handle: int) -> bool:
+        if handle not in self.pinned_handles:
+            if not self._is_candidate(handle):
+                return False
+            self.pinned_handles.add(handle)
+        return self._enforce(handle)
+
+    def _enforce(self, handle: int) -> bool:
+        if handle in self._moving_handles or not self.owner_hwnd:
+            return False
+        try:
+            if not self.user32.IsWindow(ctypes.c_void_p(handle)):
+                self.pinned_handles.discard(handle)
+                return False
+            candidate_rect = self._read_rect(handle)
+            owner_rect = self._read_rect(self.owner_hwnd)
+            if candidate_rect is None or owner_rect is None:
+                return False
+            target_x, target_y = candidate_target_in_owner(owner_rect, candidate_rect)
+            if (
+                abs(int(candidate_rect.left) - target_x) <= 1
+                and abs(int(candidate_rect.top) - target_y) <= 1
             ):
-                moved.append((handle, target_x, target_y))
-    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
-        return moved
-    return moved
+                return False
+            self._moving_handles.add(handle)
+            try:
+                moved = bool(
+                    self.user32.SetWindowPos(
+                        ctypes.c_void_p(handle),
+                        None,
+                        target_x,
+                        target_y,
+                        0,
+                        0,
+                        SWP_NOSIZE_NOZORDER_NOACTIVATE,
+                    )
+                )
+            finally:
+                self._moving_handles.discard(handle)
+            if moved:
+                self._moved_events.append((handle, target_x, target_y))
+            return moved
+        except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+            return False
+
+    def _on_win_event(
+        self,
+        _hook: int,
+        event: int,
+        hwnd: int,
+        object_id: int,
+        _child_id: int,
+        _thread_id: int,
+        _event_time: int,
+    ) -> None:
+        if object_id not in (OBJID_WINDOW, OBJID_CLIENT) or not hwnd:
+            return
+        handle = root_window_handle(self.user32, int(hwnd))
+        if event == EVENT_OBJECT_DESTROY:
+            self.pinned_handles.discard(handle)
+            return
+        if handle == self.owner_hwnd:
+            if event == EVENT_OBJECT_LOCATIONCHANGE:
+                for pinned in tuple(self.pinned_handles):
+                    self._enforce(pinned)
+            return
+        if event in (EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE):
+            self._pin_or_enforce(handle)
+
+    def reconcile(self) -> None:
+        """Recover missed events; normal positioning is callback-driven."""
+
+        try:
+            current = visible_window_handles(self.user32)
+            for handle in tuple(self.pinned_handles):
+                if handle not in current:
+                    self.pinned_handles.discard(handle)
+                else:
+                    self._enforce(handle)
+            for handle in current:
+                self._pin_or_enforce(root_window_handle(self.user32, handle))
+        except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+            return
+
+    def drain_moved_events(self) -> list[tuple[int, int, int]]:
+        events = self._moved_events[:]
+        self._moved_events.clear()
+        return events
 
 
 def emit(kind: str, *values: Any) -> None:
@@ -310,6 +493,7 @@ def run_worker(
     except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
         candidate_baseline = set()
     candidate_exclusions: set[int] = {int(owner_hwnd)} if owner_hwnd else set()
+    candidate_pinner: CandidateWindowPinner | None = None
 
     def note_activity(_event: tk.Event | None = None) -> None:
         # The owning ImeWorkerClient terminates this disposable process when
@@ -398,15 +582,25 @@ def run_worker(
             pass
 
     def track_anchor() -> None:
+        nonlocal candidate_pinner
         position_helper()
         try:
-            helper_handle = top_level_window_handle(root, ctypes.windll.user32)
+            user32 = ctypes.windll.user32
+            helper_handle = top_level_window_handle(root, user32)
             candidate_exclusions.add(helper_handle)
-            for moved_handle, target_x, target_y in move_stuck_candidate_to_bottom_right(
-                ctypes.windll.user32,
-                candidate_baseline,
-                candidate_exclusions,
-            ):
+            if candidate_pinner is None:
+                candidate_pinner = CandidateWindowPinner(
+                    user32,
+                    owner_hwnd,
+                    candidate_baseline,
+                    candidate_exclusions,
+                )
+                candidate_pinner.add_excluded_handle(helper_handle)
+                candidate_pinner.start()
+            else:
+                candidate_pinner.add_excluded_handle(helper_handle)
+            candidate_pinner.reconcile()
+            for moved_handle, target_x, target_y in candidate_pinner.drain_moved_events():
                 emit("candidate_moved", moved_handle, target_x, target_y)
         except (AttributeError, OSError, ValueError, ctypes.ArgumentError, tk.TclError):
             pass
@@ -444,6 +638,23 @@ def run_worker(
     entry.bind("<Return>", lambda _event: send_key(0x07, 0x28, "回车"))
     entry.bind("<KP_Enter>", lambda _event: send_key(0x07, 0x28, "回车"))
     entry.bind("<BackSpace>", lambda _event: send_key(0x07, 0x2A, "退格"))
+    # Install the event hook before the helper takes focus.  Otherwise the
+    # first candidate window can be painted at (0, 0) before the fallback
+    # maintenance pass has even started.
+    try:
+        user32 = ctypes.windll.user32
+        helper_handle = top_level_window_handle(root, user32)
+        candidate_exclusions.add(helper_handle)
+        candidate_pinner = CandidateWindowPinner(
+            user32,
+            owner_hwnd,
+            candidate_baseline,
+            candidate_exclusions,
+        )
+        candidate_pinner.add_excluded_handle(helper_handle)
+        candidate_pinner.start()
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError, tk.TclError):
+        candidate_pinner = None
     root.after(20, force_focus)
     root.after(90, force_focus)
     root.after(ANCHOR_POLL_MS, track_anchor)

@@ -11,6 +11,7 @@ from xinglan.ime_worker import (
     IME_WINDOW_ALPHA,
     POINT,
     RECT,
+    candidate_target_in_owner,
     create_native_caret,
     emit,
     is_stuck_top_left_candidate,
@@ -105,6 +106,24 @@ class ImeWorkerTests(unittest.TestCase):
         self.assertFalse(is_stuck_top_left_candidate(RECT(20, 30, 1900, 1050)))
         self.assertFalse(is_stuck_top_left_candidate(RECT(600, 60, 945, 125)))
         self.assertFalse(is_stuck_top_left_candidate(RECT(20, 60, 60, 90)))
+
+    def test_candidate_target_follows_owner_window_bottom_right(self) -> None:
+        owner = RECT(100, 50, 1500, 900)
+        candidate = RECT(0, 0, 345, 65)
+        self.assertEqual((1135, 775), candidate_target_in_owner(owner, candidate))
+
+    def test_candidate_positioning_is_event_driven_with_polling_only_fallback(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "xinglan" / "ime_worker.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("SetWinEventHook", source)
+        self.assertIn("EVENT_OBJECT_LOCATIONCHANGE", source)
+        self.assertIn("self.pinned_handles", source)
+        self.assertIn("ANCHOR_POLL_MS = 250", source)
+        self.assertLess(
+            source.index("candidate_pinner.start()", source.index("def run_worker")),
+            source.index("root.after(20, force_focus)"),
+        )
 
 
 if __name__ == "__main__":
