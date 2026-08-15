@@ -7,7 +7,13 @@ from pathlib import Path
 import sys
 import unittest
 
-from xinglan.ime_worker import IME_WINDOW_ALPHA, POINT, emit, resolve_screen_anchor
+from xinglan.ime_worker import (
+    IME_WINDOW_ALPHA,
+    POINT,
+    create_native_caret,
+    emit,
+    resolve_screen_anchor,
+)
 
 
 class ImeWorkerTests(unittest.TestCase):
@@ -42,6 +48,7 @@ class ImeWorkerTests(unittest.TestCase):
         self.assertIn("place_ime_caret(entry, 0, 0, height=24)", source)
         self.assertIn("ImmSetCompositionWindow", source)
         self.assertIn("ImmSetCandidateWindow", source)
+        self.assertIn("create_native_caret", source)
 
     def test_anchor_follows_owner_client_point(self) -> None:
         class ClientToScreen:
@@ -64,6 +71,32 @@ class ImeWorkerTests(unittest.TestCase):
             (720, 260),
             resolve_screen_anchor(User32(), 440, 218, 123456, 420, 180),
         )
+
+    def test_tsf_anchor_creates_caret_on_actual_focused_window(self) -> None:
+        class Function:
+            argtypes: object = None
+            restype: object = None
+
+            def __init__(self, result: object = 1) -> None:
+                self.result = result
+                self.calls: list[tuple[object, ...]] = []
+
+            def __call__(self, *args: object) -> object:
+                self.calls.append(args)
+                return self.result
+
+        class User32:
+            def __init__(self) -> None:
+                self.GetFocus = Function(9988)
+                self.CreateCaret = Function(1)
+                self.SetCaretPos = Function(1)
+                self.ShowCaret = Function(1)
+                self.DestroyCaret = Function(1)
+
+        user32 = User32()
+        self.assertTrue(create_native_caret(user32))
+        self.assertEqual((0, 0), user32.SetCaretPos.calls[-1])
+        self.assertEqual((2, 24), user32.CreateCaret.calls[-1][-2:])
 
 
 if __name__ == "__main__":

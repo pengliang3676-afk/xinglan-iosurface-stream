@@ -110,6 +110,14 @@ def apply_native_ime_anchor(root: Any, entry: Any) -> bool:
     )
     applied = False
     handles: list[int] = []
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetFocus.restype = ctypes.c_void_p
+        focused_handle = user32.GetFocus()
+        if focused_handle:
+            handles.append(int(focused_handle))
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        pass
     for widget in (entry, root):
         try:
             handle = int(widget.winfo_id())
@@ -134,6 +142,48 @@ def apply_native_ime_anchor(root: Any, entry: Any) -> bool:
         finally:
             imm32.ImmReleaseContext(native_handle, context)
     return applied
+
+
+def top_level_window_handle(root: Any, user32: Any) -> int:
+    """Return the actual Windows top-level HWND for a Tk root."""
+
+    inner_handle = int(root.winfo_id())
+    try:
+        user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        user32.GetAncestor.restype = ctypes.c_void_p
+        ancestor = user32.GetAncestor(ctypes.c_void_p(inner_handle), 2)  # GA_ROOT
+        if ancestor:
+            return int(ancestor)
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        pass
+    return inner_handle
+
+
+def create_native_caret(user32: Any) -> bool:
+    """Publish a real Win32 caret for TSF/RDP input-method positioning."""
+
+    try:
+        user32.GetFocus.restype = ctypes.c_void_p
+        focused = user32.GetFocus()
+        if not focused:
+            return False
+        focused_hwnd = ctypes.c_void_p(focused)
+        user32.CreateCaret.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        user32.SetCaretPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        user32.ShowCaret.argtypes = [ctypes.c_void_p]
+        user32.DestroyCaret()
+        if not user32.CreateCaret(focused_hwnd, None, 2, 24):
+            return False
+        user32.SetCaretPos(0, 0)
+        user32.ShowCaret(focused_hwnd)
+        return True
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        return False
 
 
 def run_worker(
@@ -232,8 +282,7 @@ def run_worker(
                 anchor_x,
                 anchor_y,
             )
-            frame_id = root.frame()
-            hwnd = int(str(frame_id), 0) if frame_id else int(root.winfo_id())
+            hwnd = top_level_window_handle(root, user32)
             if resolved != last_anchor:
                 user32.SetWindowPos.argtypes = [
                     ctypes.c_void_p,
@@ -258,6 +307,7 @@ def run_worker(
             if force_ime:
                 root.update_idletasks()
                 place_ime_caret(entry, 0, 0, height=24)
+                create_native_caret(user32)
                 apply_native_ime_anchor(root, entry)
         except (AttributeError, OSError, ValueError, ctypes.ArgumentError, tk.TclError):
             pass
@@ -273,8 +323,7 @@ def run_worker(
         position_helper(force_ime=True)
         try:
             user32 = ctypes.windll.user32
-            frame_id = root.frame()
-            hwnd = int(str(frame_id), 0) if frame_id else int(root.winfo_id())
+            hwnd = top_level_window_handle(root, user32)
             native_hwnd = ctypes.c_void_p(hwnd)
             user32.ShowWindow(native_hwnd, 5)
             user32.SetForegroundWindow(native_hwnd)
@@ -284,6 +333,10 @@ def run_worker(
             pass
         root.focus_force()
         entry.focus_force()
+        try:
+            create_native_caret(ctypes.windll.user32)
+        except (AttributeError, OSError):
+            pass
         position_helper(force_ime=True)
         note_activity()
         emit("ready")
