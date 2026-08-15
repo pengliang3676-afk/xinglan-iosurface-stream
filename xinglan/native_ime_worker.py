@@ -289,6 +289,7 @@ class NativeImeHost:
             ctypes.c_int,
         ]
         self.user32.SetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
+        self.user32.HideCaret.argtypes = [wintypes.HWND]
         self.imm32.ImmGetContext.argtypes = [wintypes.HWND]
         self.imm32.ImmGetContext.restype = wintypes.HANDLE
         self.imm32.ImmReleaseContext.argtypes = [wintypes.HWND, wintypes.HANDLE]
@@ -510,6 +511,13 @@ class NativeImeHost:
             self.imm32.ImmReleaseContext(edit, context)
 
     def handle_edit_message(self, message: int, wparam: int, lparam: int) -> int:
+        if message == WM_SETFOCUS:
+            result = self._call_original_edit(message, wparam, lparam)
+            # Keep the real Win32 caret and its geometry for TSF/Sogou, but do
+            # not paint the thin white caret over Xinglan's control divider.
+            self.user32.HideCaret(wintypes.HWND(self.edit_hwnd))
+            self.apply_ime_anchor()
+            return result
         if message == WM_IME_STARTCOMPOSITION:
             self.composing = True
             self.apply_ime_anchor()
