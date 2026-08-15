@@ -125,6 +125,23 @@ class ImeWorkerClientTests(unittest.TestCase):
         )
         thread.return_value.start.assert_called_once_with()
 
+    def test_deactivate_closes_job_to_kill_frozen_helper_tree(self) -> None:
+        root = Root()
+        client = ImeWorkerClient(root, lambda _text: None, lambda *_value: None)
+        process = mock.Mock()
+        process.poll.return_value = None
+        job = mock.Mock()
+        client._process = process
+        client._process_job = job
+
+        with mock.patch("xinglan.ime_worker_client.threading.Thread") as thread:
+            client.deactivate()
+
+        job.close.assert_called_once_with()
+        process.terminate.assert_not_called()
+        thread.assert_called_once()
+        thread.return_value.start.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

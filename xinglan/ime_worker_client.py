@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import queue
@@ -8,6 +9,8 @@ import sys
 import threading
 from pathlib import Path
 from typing import Callable
+
+from ctypes import wintypes
 
 
 Message = list[object]
@@ -18,6 +21,99 @@ LOGGER = logging.getLogger(__name__)
 # restarted after every phone click so its native IME memory can be reclaimed;
 # suppress only that cursor feedback and keep the existing lifetime policy.
 _STARTF_FORCEOFFFEEDBACK = 0x00000080
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", _IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _WorkerProcessJob:
+    """Own a frozen helper process tree and kill it when the job is closed."""
+
+    def __init__(self, handle: int) -> None:
+        self.handle = int(handle)
+
+    @classmethod
+    def attach(cls, process: subprocess.Popen[str]) -> _WorkerProcessJob | None:
+        if sys.platform != "win32" or not hasattr(process, "_handle"):
+            return None
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        information = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        information.BasicLimitInformation.LimitFlags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+        configured = kernel32.SetInformationJobObject(
+            job,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+        )
+        assigned = configured and kernel32.AssignProcessToJobObject(
+            job, wintypes.HANDLE(int(process._handle))
+        )
+        if not assigned:
+            kernel32.CloseHandle(job)
+            return None
+        return cls(int(job))
+
+    def close(self) -> None:
+        if not self.handle:
+            return
+        handle, self.handle = self.handle, 0
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle(wintypes.HANDLE(handle))
 
 
 class ImeWorkerClient:
@@ -34,6 +130,7 @@ class ImeWorkerClient:
         self.on_key = on_key
         self._messages: queue.SimpleQueue[tuple[int, Message]] = queue.SimpleQueue()
         self._process: subprocess.Popen[str] | None = None
+        self._process_job: _WorkerProcessJob | None = None
         self._generation = 0
         self._closing = False
         self.root.after(20, self._poll)
@@ -122,6 +219,9 @@ class ImeWorkerClient:
             startupinfo=self._startup_info(),
         )
         self._process = process
+        self._process_job = _WorkerProcessJob.attach(process)
+        if self._process_job is None and sys.platform == "win32":
+            LOGGER.warning("IME worker process tree could not join kill-on-close job")
         threading.Thread(
             target=self._read_messages,
             args=(generation, process),
@@ -194,19 +294,27 @@ class ImeWorkerClient:
             except (OSError, subprocess.TimeoutExpired):
                 pass
             self._process = None
+            job, self._process_job = self._process_job, None
+            if job is not None:
+                job.close()
         self.root.after(20, self._poll)
 
     def deactivate(self) -> None:
         self._generation += 1
         process = self._process
         self._process = None
+        job, self._process_job = self._process_job, None
+        if job is not None:
+            # Closing a KILL_ON_JOB_CLOSE job terminates both the PyInstaller
+            # one-file bootloader and its extracted child process.
+            job.close()
         if process is None:
             return
         # This method is called from Tk's mouse-release handler.  Waiting for a
         # frozen helper process here blocks the whole UI for up to 1.6 seconds,
         # which is especially visible in the packaged EXE.  Ask the old worker
         # to stop immediately, then reap/kill it on a background thread.
-        if process.poll() is None:
+        if job is None and process.poll() is None:
             try:
                 process.terminate()
             except OSError:
