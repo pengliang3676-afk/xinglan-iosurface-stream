@@ -46,9 +46,9 @@ class ImeWorkerClient:
     def _worker_command(cls, screen_x: int, screen_y: int) -> list[str]:
         coordinates = [
             "--x",
-            str(max(1, int(screen_x))),
+            str(int(screen_x)),
             "--y",
-            str(max(1, int(screen_y))),
+            str(int(screen_y)),
         ]
         if getattr(sys, "frozen", False):
             helper = Path(sys.executable).with_name("星澜输入.exe")

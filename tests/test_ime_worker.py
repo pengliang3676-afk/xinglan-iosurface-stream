@@ -33,6 +33,13 @@ class ImeWorkerTests(unittest.TestCase):
         self.assertNotIn("IDLE_EXIT_MS", source)
         self.assertNotIn("root.after(IDLE", source)
 
+    def test_helper_sets_native_position_and_ime_caret_anchor(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "xinglan" / "ime_worker.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("user32.SetWindowPos", source)
+        self.assertIn("place_ime_caret(entry, 0, 0, height=24)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,8 @@ import sys
 import tkinter as tk
 from typing import Any
 
+from xinglan.ime_position import place_ime_caret
+
 
 IME_WINDOW_ALPHA = 0.0
 
@@ -35,7 +37,11 @@ def run_worker(screen_x: int, screen_y: int) -> None:
     # The helper must own keyboard focus so Windows IME can compose text, but
     # its 2x2 native window must never be visible over the projected phone.
     root.attributes("-alpha", IME_WINDOW_ALPHA)
-    root.geometry(f"2x2+{max(1, screen_x)}+{max(1, screen_y)}")
+    # Start harmlessly on the primary display.  force_focus() places the
+    # native top-level with signed virtual-screen coordinates; Tk's geometry
+    # syntax interprets negative values as offsets from the right/bottom edge
+    # and therefore cannot represent a monitor to the left of the primary.
+    root.geometry("2x2+0+0")
 
     value = tk.StringVar(value="")
     consuming = False
@@ -99,16 +105,43 @@ def run_worker(screen_x: int, screen_y: int) -> None:
         root.lift()
         root.update_idletasks()
         try:
-            hwnd = int(root.winfo_id())
             user32 = ctypes.windll.user32
-            user32.ShowWindow(hwnd, 5)
-            user32.SetForegroundWindow(hwnd)
-            user32.SetActiveWindow(hwnd)
-            user32.SetFocus(hwnd)
+            frame_id = root.frame()
+            hwnd = int(str(frame_id), 0) if frame_id else int(root.winfo_id())
+            # SetWindowPos accepts signed virtual-screen coordinates, so an
+            # IME opened on a monitor left/above the primary screen remains
+            # next to the projected phone instead of being clamped to (1, 1).
+            user32.SetWindowPos.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            native_hwnd = ctypes.c_void_p(hwnd)
+            user32.SetWindowPos(
+                native_hwnd,
+                ctypes.c_void_p(-1),
+                int(screen_x),
+                int(screen_y),
+                2,
+                2,
+                0x0040,
+            )
+            user32.ShowWindow(native_hwnd, 5)
+            user32.SetForegroundWindow(native_hwnd)
+            user32.SetActiveWindow(native_hwnd)
+            user32.SetFocus(native_hwnd)
         except (AttributeError, OSError, ValueError):
             pass
         root.focus_force()
         entry.focus_force()
+        # Tk otherwise reports a default caret at the application's origin;
+        # several Windows IMEs then pin their composition/candidate window to
+        # the upper-left corner even though the hidden helper itself was moved.
+        place_ime_caret(entry, 0, 0, height=24)
         note_activity()
         emit("ready")
 

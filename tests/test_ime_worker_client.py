@@ -23,7 +23,14 @@ class ImeWorkerClientTests(unittest.TestCase):
             command = ImeWorkerClient._worker_command(0, 25)
         self.assertEqual(sys.executable, command[0])
         self.assertEqual("--ime-worker", command[1])
-        self.assertEqual(["--x", "1", "--y", "25"], command[2:])
+        self.assertEqual(["--x", "0", "--y", "25"], command[2:])
+
+    def test_worker_preserves_negative_virtual_screen_coordinates(self) -> None:
+        with mock.patch.object(sys, "frozen", True, create=True), mock.patch(
+            "xinglan.ime_worker_client.Path.is_file", return_value=False
+        ):
+            command = ImeWorkerClient._worker_command(-1280, -40)
+        self.assertEqual(["--x", "-1280", "--y", "-40"], command[2:])
 
     def test_frozen_worker_prefers_bundled_console_helper(self) -> None:
         with mock.patch.object(sys, "frozen", True, create=True), mock.patch(
