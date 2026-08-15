@@ -10,8 +10,10 @@ import unittest
 from xinglan.ime_worker import (
     IME_WINDOW_ALPHA,
     POINT,
+    RECT,
     create_native_caret,
     emit,
+    is_stuck_top_left_candidate,
     resolve_screen_anchor,
 )
 
@@ -97,6 +99,12 @@ class ImeWorkerTests(unittest.TestCase):
         self.assertTrue(create_native_caret(user32))
         self.assertEqual((0, 0), user32.SetCaretPos.calls[-1])
         self.assertEqual((2, 24), user32.CreateCaret.calls[-1][-2:])
+
+    def test_only_compact_top_left_windows_match_candidate_fallback(self) -> None:
+        self.assertTrue(is_stuck_top_left_candidate(RECT(20, 60, 365, 125)))
+        self.assertFalse(is_stuck_top_left_candidate(RECT(20, 30, 1900, 1050)))
+        self.assertFalse(is_stuck_top_left_candidate(RECT(600, 60, 945, 125)))
+        self.assertFalse(is_stuck_top_left_candidate(RECT(20, 60, 60, 90)))
 
 
 if __name__ == "__main__":

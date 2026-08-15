@@ -46,6 +46,86 @@ class CANDIDATEFORM(ctypes.Structure):
     ]
 
 
+def is_stuck_top_left_candidate(rect: RECT) -> bool:
+    """Recognize the compact IME panel shown at the RDP desktop origin."""
+
+    width = int(rect.right - rect.left)
+    height = int(rect.bottom - rect.top)
+    return (
+        -8 <= int(rect.left) <= 100
+        and -8 <= int(rect.top) <= 180
+        and 80 <= width <= 900
+        and 20 <= height <= 320
+    )
+
+
+def visible_window_handles(user32: Any) -> set[int]:
+    """Snapshot visible top-level HWNDs without retaining callback pointers."""
+
+    handles: set[int] = set()
+    callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    @callback_type
+    def collect(hwnd: int, _lparam: int) -> bool:
+        if user32.IsWindowVisible(ctypes.c_void_p(hwnd)):
+            handles.add(int(hwnd))
+        return True
+
+    user32.EnumWindows.argtypes = [callback_type, ctypes.c_void_p]
+    user32.EnumWindows(collect, None)
+    return handles
+
+
+def move_stuck_candidate_to_bottom_right(
+    user32: Any,
+    baseline_visible: set[int],
+    excluded_handles: set[int],
+) -> list[tuple[int, int, int]]:
+    """Move newly shown, top-left IME panels to a deterministic safe corner."""
+
+    moved: list[tuple[int, int, int]] = []
+    try:
+        screen_width = int(user32.GetSystemMetrics(0))  # SM_CXSCREEN
+        screen_height = int(user32.GetSystemMetrics(1))  # SM_CYSCREEN
+        current = visible_window_handles(user32)
+        user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(RECT)]
+        user32.SetWindowPos.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        for handle in current - baseline_visible - excluded_handles:
+            rect = RECT()
+            native_handle = ctypes.c_void_p(handle)
+            if not user32.GetWindowRect(native_handle, ctypes.byref(rect)):
+                continue
+            if not is_stuck_top_left_candidate(rect):
+                continue
+            width = int(rect.right - rect.left)
+            height = int(rect.bottom - rect.top)
+            target_x = max(0, screen_width - width - 12)
+            target_y = max(0, screen_height - height - 48)
+            # Preserve size, activation and z-order.  Only its screen position
+            # changes, so the IME retains ownership and keyboard behavior.
+            if user32.SetWindowPos(
+                native_handle,
+                None,
+                target_x,
+                target_y,
+                0,
+                0,
+                0x0015,  # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+            ):
+                moved.append((handle, target_x, target_y))
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        return moved
+    return moved
+
+
 def emit(kind: str, *values: Any) -> None:
     stream = sys.stdout
     if stream is None:
@@ -225,6 +305,11 @@ def run_worker(
     )
     entry.place(x=0, y=0, width=2, height=2)
     last_anchor: tuple[int, int] | None = None
+    try:
+        candidate_baseline = visible_window_handles(ctypes.windll.user32)
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        candidate_baseline = set()
+    candidate_exclusions: set[int] = {int(owner_hwnd)} if owner_hwnd else set()
 
     def note_activity(_event: tk.Event | None = None) -> None:
         # The owning ImeWorkerClient terminates this disposable process when
@@ -314,6 +399,17 @@ def run_worker(
 
     def track_anchor() -> None:
         position_helper()
+        try:
+            helper_handle = top_level_window_handle(root, ctypes.windll.user32)
+            candidate_exclusions.add(helper_handle)
+            for moved_handle, target_x, target_y in move_stuck_candidate_to_bottom_right(
+                ctypes.windll.user32,
+                candidate_baseline,
+                candidate_exclusions,
+            ):
+                emit("candidate_moved", moved_handle, target_x, target_y)
+        except (AttributeError, OSError, ValueError, ctypes.ArgumentError, tk.TclError):
+            pass
         root.after(ANCHOR_POLL_MS, track_anchor)
 
     def force_focus() -> None:

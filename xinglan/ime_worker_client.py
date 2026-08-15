@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from typing import Callable
 
 
 Message = list[object]
+LOGGER = logging.getLogger(__name__)
 
 # Windows normally shows the "app starting" busy ring beside the pointer when
 # the foreground process launches a helper.  The IME helper is intentionally
@@ -164,6 +166,13 @@ class ImeWorkerClient:
                 self.on_text(str(message[1]))
             elif kind == "key" and len(message) >= 4:
                 self.on_key(int(message[1]), int(message[2]), str(message[3]))
+            elif kind == "candidate_moved" and len(message) >= 4:
+                LOGGER.info(
+                    "IME candidate moved hwnd=%s target=%s,%s",
+                    message[1],
+                    message[2],
+                    message[3],
+                )
         process = self._process
         if process is not None and process.poll() is not None:
             try:
