@@ -10,8 +10,6 @@ from typing import Any
 HOST_CLASS_NAME = "XinglanNativeImeHost"
 HOST_WIDTH = 12
 HOST_HEIGHT = 24
-OWNER_RIGHT_INSET = 390
-OWNER_BOTTOM_INSET = 150
 FOLLOW_TIMER_MS = 30
 
 WS_POPUP = 0x80000000
@@ -136,17 +134,25 @@ def emit(kind: str, *values: Any) -> None:
 
 
 def native_host_target(
-    owner: RECT | None,
+    user32: Any,
+    owner_hwnd: int,
+    anchor_x: int,
+    anchor_y: int,
     fallback_x: int,
     fallback_y: int,
 ) -> tuple[int, int]:
-    """Return a real caret position in the Xinglan window's lower-right area."""
+    """Follow the exact phone point clicked in Xinglan's client area."""
 
-    if owner is None:
-        return int(fallback_x), int(fallback_y)
-    x = max(int(owner.left) + 20, int(owner.right) - OWNER_RIGHT_INSET)
-    y = max(int(owner.top) + 40, int(owner.bottom) - OWNER_BOTTOM_INSET)
-    return x, y
+    if owner_hwnd:
+        point = POINT(int(anchor_x), int(anchor_y))
+        try:
+            if user32.ClientToScreen(
+                wintypes.HWND(owner_hwnd), ctypes.byref(point)
+            ):
+                return int(point.x), int(point.y)
+        except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+            pass
+    return int(fallback_x), int(fallback_y)
 
 
 _HOSTS: dict[int, "NativeImeHost"] = {}
@@ -174,13 +180,23 @@ def _edit_window_proc(hwnd: int, message: int, wparam: int, lparam: int) -> int:
 class NativeImeHost:
     """A standard Win32 EDIT that gives TSF/IMM a genuine caret rectangle."""
 
-    def __init__(self, fallback_x: int, fallback_y: int, owner_hwnd: int) -> None:
+    def __init__(
+        self,
+        fallback_x: int,
+        fallback_y: int,
+        owner_hwnd: int,
+        anchor_x: int = 0,
+        anchor_y: int = 0,
+    ) -> None:
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
         self.gdi32 = ctypes.windll.gdi32
         self.imm32 = ctypes.windll.imm32
         self.fallback_x = int(fallback_x)
         self.fallback_y = int(fallback_y)
+        self.anchor_owner_hwnd = int(owner_hwnd)
+        self.anchor_x = int(anchor_x)
+        self.anchor_y = int(anchor_y)
         self.owner_hwnd = self._root_handle(int(owner_hwnd))
         self.instance = 0
         self.host_hwnd = 0
@@ -243,6 +259,10 @@ class NativeImeHost:
         self.user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
         self.user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
         self.user32.GetAncestor.restype = wintypes.HWND
+        self.user32.ClientToScreen.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(POINT),
+        ]
         self.user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
         self.user32.IsWindow.argtypes = [wintypes.HWND]
         self.user32.SetWindowPos.argtypes = [
@@ -340,7 +360,14 @@ class NativeImeHost:
 
     def _create_windows(self) -> None:
         self._register_host_class()
-        x, y = native_host_target(self._owner_rect(), self.fallback_x, self.fallback_y)
+        x, y = native_host_target(
+            self.user32,
+            self.anchor_owner_hwnd,
+            self.anchor_x,
+            self.anchor_y,
+            self.fallback_x,
+            self.fallback_y,
+        )
         owner = wintypes.HWND(self.owner_hwnd) if self.owner_hwnd else None
         host = self.user32.CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -406,7 +433,14 @@ class NativeImeHost:
         if self.owner_hwnd and owner is None:
             self.user32.DestroyWindow(wintypes.HWND(self.host_hwnd))
             return
-        target = native_host_target(owner, self.fallback_x, self.fallback_y)
+        target = native_host_target(
+            self.user32,
+            self.anchor_owner_hwnd,
+            self.anchor_x,
+            self.anchor_y,
+            self.fallback_x,
+            self.fallback_y,
+        )
         if target != self.last_position:
             self.user32.SetWindowPos(
                 wintypes.HWND(self.host_hwnd),
@@ -603,5 +637,7 @@ def run_native_ime_worker(
     screen_x: int,
     screen_y: int,
     owner_hwnd: int = 0,
+    anchor_x: int = 0,
+    anchor_y: int = 0,
 ) -> None:
-    NativeImeHost(screen_x, screen_y, owner_hwnd).run()
+    NativeImeHost(screen_x, screen_y, owner_hwnd, anchor_x, anchor_y).run()

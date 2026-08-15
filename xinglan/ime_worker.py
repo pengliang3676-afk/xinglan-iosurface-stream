@@ -672,7 +672,13 @@ def main() -> None:
     if sys.platform == "win32":
         from xinglan.native_ime_worker import run_native_ime_worker
 
-        run_native_ime_worker(args.x, args.y, args.owner_hwnd)
+        run_native_ime_worker(
+            args.x,
+            args.y,
+            args.owner_hwnd,
+            args.anchor_x,
+            args.anchor_y,
+        )
         return
     run_worker(
         args.x,
