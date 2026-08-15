@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import ctypes
 import io
 import json
 from pathlib import Path
 import sys
 import unittest
 
-from xinglan.ime_worker import IME_WINDOW_ALPHA, emit
+from xinglan.ime_worker import IME_WINDOW_ALPHA, POINT, emit, resolve_screen_anchor
 
 
 class ImeWorkerTests(unittest.TestCase):
@@ -39,6 +40,30 @@ class ImeWorkerTests(unittest.TestCase):
         )
         self.assertIn("user32.SetWindowPos", source)
         self.assertIn("place_ime_caret(entry, 0, 0, height=24)", source)
+        self.assertIn("ImmSetCompositionWindow", source)
+        self.assertIn("ImmSetCandidateWindow", source)
+
+    def test_anchor_follows_owner_client_point(self) -> None:
+        class ClientToScreen:
+            argtypes: object = None
+
+            def __call__(self, _hwnd: object, point_pointer: object) -> int:
+                point = ctypes.cast(
+                    point_pointer,
+                    ctypes.POINTER(POINT),
+                ).contents
+                point.x += 300
+                point.y += 80
+                return 1
+
+        class User32:
+            def __init__(self) -> None:
+                self.ClientToScreen = ClientToScreen()
+
+        self.assertEqual(
+            (720, 260),
+            resolve_screen_anchor(User32(), 440, 218, 123456, 420, 180),
+        )
 
 
 if __name__ == "__main__":

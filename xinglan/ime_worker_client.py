@@ -43,12 +43,25 @@ class ImeWorkerClient:
         return str(pythonw if pythonw.exists() else executable)
 
     @classmethod
-    def _worker_command(cls, screen_x: int, screen_y: int) -> list[str]:
+    def _worker_command(
+        cls,
+        screen_x: int,
+        screen_y: int,
+        owner_hwnd: int = 0,
+        anchor_x: int = 0,
+        anchor_y: int = 0,
+    ) -> list[str]:
         coordinates = [
             "--x",
             str(int(screen_x)),
             "--y",
             str(int(screen_y)),
+            "--owner-hwnd",
+            str(int(owner_hwnd)),
+            "--anchor-x",
+            str(int(anchor_x)),
+            "--anchor-y",
+            str(int(anchor_y)),
         ]
         if getattr(sys, "frozen", False):
             helper = Path(sys.executable).with_name("星澜输入.exe")
@@ -72,7 +85,26 @@ class ImeWorkerClient:
             return
         self._generation += 1
         generation = self._generation
-        command = self._worker_command(screen_x, screen_y)
+        owner_hwnd = 0
+        anchor_x = 0
+        anchor_y = 0
+        try:
+            # Keep a client-relative anchor as well as the initial absolute
+            # fallback.  The helper can then follow the main window without
+            # restarting IME composition while the user moves the app.
+            self.root.update_idletasks()
+            owner_hwnd = int(self.root.winfo_id())
+            anchor_x = int(screen_x) - int(self.root.winfo_rootx())
+            anchor_y = int(screen_y) - int(self.root.winfo_rooty())
+        except (AttributeError, TypeError, ValueError):
+            pass
+        command = self._worker_command(
+            screen_x,
+            screen_y,
+            owner_hwnd,
+            anchor_x,
+            anchor_y,
+        )
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         process = subprocess.Popen(
             command,

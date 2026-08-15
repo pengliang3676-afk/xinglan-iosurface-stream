@@ -23,14 +23,40 @@ class ImeWorkerClientTests(unittest.TestCase):
             command = ImeWorkerClient._worker_command(0, 25)
         self.assertEqual(sys.executable, command[0])
         self.assertEqual("--ime-worker", command[1])
-        self.assertEqual(["--x", "0", "--y", "25"], command[2:])
+        self.assertEqual(
+            [
+                "--x", "0", "--y", "25",
+                "--owner-hwnd", "0", "--anchor-x", "0", "--anchor-y", "0",
+            ],
+            command[2:],
+        )
 
     def test_worker_preserves_negative_virtual_screen_coordinates(self) -> None:
         with mock.patch.object(sys, "frozen", True, create=True), mock.patch(
             "xinglan.ime_worker_client.Path.is_file", return_value=False
         ):
             command = ImeWorkerClient._worker_command(-1280, -40)
-        self.assertEqual(["--x", "-1280", "--y", "-40"], command[2:])
+        self.assertEqual(
+            [
+                "--x", "-1280", "--y", "-40",
+                "--owner-hwnd", "0", "--anchor-x", "0", "--anchor-y", "0",
+            ],
+            command[2:],
+        )
+
+    def test_worker_receives_main_window_relative_anchor(self) -> None:
+        with mock.patch.object(sys, "frozen", True, create=True), mock.patch(
+            "xinglan.ime_worker_client.Path.is_file", return_value=False
+        ):
+            command = ImeWorkerClient._worker_command(440, 218, 123456, 420, 180)
+        self.assertEqual(
+            [
+                "--owner-hwnd", "123456",
+                "--anchor-x", "420",
+                "--anchor-y", "180",
+            ],
+            command[-6:],
+        )
 
     def test_frozen_worker_prefers_bundled_console_helper(self) -> None:
         with mock.patch.object(sys, "frozen", True, create=True), mock.patch(
@@ -38,7 +64,13 @@ class ImeWorkerClientTests(unittest.TestCase):
         ):
             command = ImeWorkerClient._worker_command(12, 34)
         self.assertTrue(command[0].endswith("星澜输入.exe"))
-        self.assertEqual(["--x", "12", "--y", "34"], command[1:])
+        self.assertEqual(
+            [
+                "--x", "12", "--y", "34",
+                "--owner-hwnd", "0", "--anchor-x", "0", "--anchor-y", "0",
+            ],
+            command[1:],
+        )
 
     def test_startup_info_disables_windows_busy_cursor_feedback(self) -> None:
         startup_info = ImeWorkerClient._startup_info()

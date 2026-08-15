@@ -11,6 +11,39 @@ from xinglan.ime_position import place_ime_caret
 
 
 IME_WINDOW_ALPHA = 0.0
+ANCHOR_POLL_MS = 50
+CFS_FORCE_POSITION = 0x0020
+CFS_CANDIDATEPOS = 0x0040
+
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class COMPOSITIONFORM(ctypes.Structure):
+    _fields_ = [
+        ("dwStyle", ctypes.c_uint32),
+        ("ptCurrentPos", POINT),
+        ("rcArea", RECT),
+    ]
+
+
+class CANDIDATEFORM(ctypes.Structure):
+    _fields_ = [
+        ("dwIndex", ctypes.c_uint32),
+        ("dwStyle", ctypes.c_uint32),
+        ("ptCurrentPos", POINT),
+        ("rcArea", RECT),
+    ]
 
 
 def emit(kind: str, *values: Any) -> None:
@@ -23,12 +56,98 @@ def emit(kind: str, *values: Any) -> None:
     stream.flush()
 
 
-def run_worker(screen_x: int, screen_y: int) -> None:
+def resolve_screen_anchor(
+    user32: Any,
+    fallback_x: int,
+    fallback_y: int,
+    owner_hwnd: int,
+    anchor_x: int,
+    anchor_y: int,
+) -> tuple[int, int]:
+    """Resolve a main-window client point into signed virtual-screen pixels."""
+
+    if not owner_hwnd:
+        return int(fallback_x), int(fallback_y)
+    point = POINT(int(anchor_x), int(anchor_y))
+    try:
+        user32.ClientToScreen.argtypes = [ctypes.c_void_p, ctypes.POINTER(POINT)]
+        if user32.ClientToScreen(ctypes.c_void_p(owner_hwnd), ctypes.byref(point)):
+            return int(point.x), int(point.y)
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        pass
+    return int(fallback_x), int(fallback_y)
+
+
+def apply_native_ime_anchor(root: Any, entry: Any) -> bool:
+    """Force both IMM composition and candidate UI beside the hidden caret."""
+
+    try:
+        imm32 = ctypes.windll.imm32
+        imm32.ImmGetContext.argtypes = [ctypes.c_void_p]
+        imm32.ImmGetContext.restype = ctypes.c_void_p
+        imm32.ImmReleaseContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        imm32.ImmSetCompositionWindow.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(COMPOSITIONFORM),
+        ]
+        imm32.ImmSetCandidateWindow.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(CANDIDATEFORM),
+        ]
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        return False
+
+    composition = COMPOSITIONFORM(
+        CFS_FORCE_POSITION,
+        POINT(0, 0),
+        RECT(0, 0, 2, 24),
+    )
+    candidate = CANDIDATEFORM(
+        0,
+        CFS_CANDIDATEPOS,
+        POINT(0, 24),
+        RECT(0, 0, 2, 24),
+    )
+    applied = False
+    handles: list[int] = []
+    for widget in (entry, root):
+        try:
+            handle = int(widget.winfo_id())
+        except (AttributeError, TypeError, ValueError, tk.TclError):
+            continue
+        if handle and handle not in handles:
+            handles.append(handle)
+
+    for handle in handles:
+        native_handle = ctypes.c_void_p(handle)
+        context = imm32.ImmGetContext(native_handle)
+        if not context:
+            continue
+        try:
+            composition_ok = bool(
+                imm32.ImmSetCompositionWindow(context, ctypes.byref(composition))
+            )
+            candidate_ok = bool(
+                imm32.ImmSetCandidateWindow(context, ctypes.byref(candidate))
+            )
+            applied = applied or composition_ok or candidate_ok
+        finally:
+            imm32.ImmReleaseContext(native_handle, context)
+    return applied
+
+
+def run_worker(
+    screen_x: int,
+    screen_y: int,
+    owner_hwnd: int = 0,
+    anchor_x: int = 0,
+    anchor_y: int = 0,
+) -> None:
     """Run a tiny, disposable Windows IME owner.
 
     This is the last live-verified input path: the helper owns Windows IME
-    composition memory and exits after an idle input burst, while projection,
-    USB and grouping remain in the long-running main process.
+    composition memory while projection, USB and grouping remain in the
+    long-running main process.  Its owner terminates it when input focus moves.
     """
     root = tk.Tk()
     root.withdraw()
@@ -55,6 +174,7 @@ def run_worker(screen_x: int, screen_y: int) -> None:
         cursor="arrow",
     )
     entry.place(x=0, y=0, width=2, height=2)
+    last_anchor: tuple[int, int] | None = None
 
     def note_activity(_event: tk.Event | None = None) -> None:
         # The owning ImeWorkerClient terminates this disposable process when
@@ -100,36 +220,62 @@ def run_worker(screen_x: int, screen_y: int) -> None:
             emit("text", text)
         return "break"
 
+    def position_helper(*, force_ime: bool = False) -> None:
+        nonlocal last_anchor
+        try:
+            user32 = ctypes.windll.user32
+            resolved = resolve_screen_anchor(
+                user32,
+                screen_x,
+                screen_y,
+                owner_hwnd,
+                anchor_x,
+                anchor_y,
+            )
+            frame_id = root.frame()
+            hwnd = int(str(frame_id), 0) if frame_id else int(root.winfo_id())
+            if resolved != last_anchor:
+                user32.SetWindowPos.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_uint,
+                ]
+                user32.SetWindowPos(
+                    ctypes.c_void_p(hwnd),
+                    ctypes.c_void_p(-1),
+                    resolved[0],
+                    resolved[1],
+                    2,
+                    2,
+                    0x0040,
+                )
+                last_anchor = resolved
+                force_ime = True
+            if force_ime:
+                root.update_idletasks()
+                place_ime_caret(entry, 0, 0, height=24)
+                apply_native_ime_anchor(root, entry)
+        except (AttributeError, OSError, ValueError, ctypes.ArgumentError, tk.TclError):
+            pass
+
+    def track_anchor() -> None:
+        position_helper()
+        root.after(ANCHOR_POLL_MS, track_anchor)
+
     def force_focus() -> None:
         root.deiconify()
         root.lift()
         root.update_idletasks()
+        position_helper(force_ime=True)
         try:
             user32 = ctypes.windll.user32
             frame_id = root.frame()
             hwnd = int(str(frame_id), 0) if frame_id else int(root.winfo_id())
-            # SetWindowPos accepts signed virtual-screen coordinates, so an
-            # IME opened on a monitor left/above the primary screen remains
-            # next to the projected phone instead of being clamped to (1, 1).
-            user32.SetWindowPos.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_uint,
-            ]
             native_hwnd = ctypes.c_void_p(hwnd)
-            user32.SetWindowPos(
-                native_hwnd,
-                ctypes.c_void_p(-1),
-                int(screen_x),
-                int(screen_y),
-                2,
-                2,
-                0x0040,
-            )
             user32.ShowWindow(native_hwnd, 5)
             user32.SetForegroundWindow(native_hwnd)
             user32.SetActiveWindow(native_hwnd)
@@ -138,10 +284,7 @@ def run_worker(screen_x: int, screen_y: int) -> None:
             pass
         root.focus_force()
         entry.focus_force()
-        # Tk otherwise reports a default caret at the application's origin;
-        # several Windows IMEs then pin their composition/candidate window to
-        # the upper-left corner even though the hidden helper itself was moved.
-        place_ime_caret(entry, 0, 0, height=24)
+        position_helper(force_ime=True)
         note_activity()
         emit("ready")
 
@@ -154,6 +297,7 @@ def run_worker(screen_x: int, screen_y: int) -> None:
     entry.bind("<BackSpace>", lambda _event: send_key(0x07, 0x2A, "退格"))
     root.after(20, force_focus)
     root.after(90, force_focus)
+    root.after(ANCHOR_POLL_MS, track_anchor)
     root.mainloop()
 
 
@@ -161,8 +305,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--x", type=int, required=True)
     parser.add_argument("--y", type=int, required=True)
+    parser.add_argument("--owner-hwnd", type=int, default=0)
+    parser.add_argument("--anchor-x", type=int, default=0)
+    parser.add_argument("--anchor-y", type=int, default=0)
     args = parser.parse_args()
-    run_worker(args.x, args.y)
+    run_worker(
+        args.x,
+        args.y,
+        args.owner_hwnd,
+        args.anchor_x,
+        args.anchor_y,
+    )
 
 
 if __name__ == "__main__":
