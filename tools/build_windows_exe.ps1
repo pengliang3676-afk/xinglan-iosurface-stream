@@ -3,7 +3,8 @@
     [string]$PythonExe,
     [switch]$ConsoleMain,
     [switch]$E5Optimized,
-    [switch]$ImeFollowTest
+    [switch]$ImeFollowTest,
+    [switch]$NativeImeTest
 )
 
 # Windows PowerShell 5.1 requires a BOM to parse Chinese string literals.
@@ -16,11 +17,11 @@ $usbmuxTools = Join-Path (Split-Path $projectRoot -Parent) "independent-usbmux-t
 $baselineProject = Join-Path (Split-Path $projectRoot -Parent) "星澜_USB原生群控_新版"
 $configSource = Join-Path $baselineProject "config\device_groups.json"
 $integratedPackage = Join-Path $projectRoot "phone\packages\星澜TP-TrollVNC静默整合版_RootHide_0.9.0.deb"
-if ($E5Optimized -and $ImeFollowTest) {
-    throw "双路E5和候选框测试版不能同时构建"
+if (@($E5Optimized, $ImeFollowTest, $NativeImeTest).Where({ $_ }).Count -gt 1) {
+    throw "只能选择一种特殊构建模式"
 }
-$mainName = if ($ImeFollowTest) { "星澜_候选框跟随测试" } elseif ($E5Optimized) { "星澜_双路E5" } else { "星澜" }
-$releaseName = if ($ImeFollowTest) { "星澜_候选框跟随测试版" } elseif ($E5Optimized) { "星澜_双路E5优化版" } else { "星澜_TrollVNC触控版" }
+$mainName = if ($NativeImeTest) { "星澜_原生输入宿主测试" } elseif ($ImeFollowTest) { "星澜_候选框跟随测试" } elseif ($E5Optimized) { "星澜_双路E5" } else { "星澜" }
+$releaseName = if ($NativeImeTest) { "星澜_原生输入宿主测试版" } elseif ($ImeFollowTest) { "星澜_候选框跟随测试版" } elseif ($E5Optimized) { "星澜_双路E5优化版" } else { "星澜_TrollVNC触控版" }
 
 function Remove-GeneratedPath {
     param(

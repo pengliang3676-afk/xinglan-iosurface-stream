@@ -669,6 +669,11 @@ def main() -> None:
     parser.add_argument("--anchor-x", type=int, default=0)
     parser.add_argument("--anchor-y", type=int, default=0)
     args = parser.parse_args()
+    if sys.platform == "win32":
+        from xinglan.native_ime_worker import run_native_ime_worker
+
+        run_native_ime_worker(args.x, args.y, args.owner_hwnd)
+        return
     run_worker(
         args.x,
         args.y,
