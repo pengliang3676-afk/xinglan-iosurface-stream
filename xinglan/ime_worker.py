@@ -8,7 +8,6 @@ import tkinter as tk
 from typing import Any
 
 
-IDLE_EXIT_MS = 8000
 IME_WINDOW_ALPHA = 0.0
 
 
@@ -41,7 +40,6 @@ def run_worker(screen_x: int, screen_y: int) -> None:
     value = tk.StringVar(value="")
     consuming = False
     consume_job: str | None = None
-    exit_job: str | None = None
     entry = tk.Entry(
         root,
         textvariable=value,
@@ -52,20 +50,13 @@ def run_worker(screen_x: int, screen_y: int) -> None:
     )
     entry.place(x=0, y=0, width=2, height=2)
 
-    def close_worker() -> None:
-        try:
-            root.destroy()
-        except tk.TclError:
-            pass
-
     def note_activity(_event: tk.Event | None = None) -> None:
-        nonlocal exit_job
-        if exit_job is not None:
-            try:
-                root.after_cancel(exit_job)
-            except tk.TclError:
-                pass
-        exit_job = root.after(IDLE_EXIT_MS, close_worker)
+        # The owning ImeWorkerClient terminates this disposable process when
+        # the user clicks another phone, stops projection, switches groups, or
+        # closes the app.  Do not add an idle self-exit here: once this hidden
+        # window owns keyboard focus, exiting leaves neither it nor the main
+        # canvas able to receive typing/Ctrl+V until the phone is clicked again.
+        return None
 
     def consume() -> None:
         nonlocal consuming, consume_job

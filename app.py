@@ -627,6 +627,9 @@ class DeviceTile:
         point = self._normalized(event)
         if point is None:
             return
+        # Cover the short helper start-up interval: Tk canvases do not
+        # reliably take keyboard focus merely because they were clicked.
+        self.canvas.focus_set()
         self.dragging = True
         self.last_touch_point = point
         self.owner.route_touch(self.session, 1, *point, from_master=False)
@@ -897,6 +900,7 @@ class MasterView:
         point = self._normalized(event)
         if point is None:
             return
+        self.canvas.focus_set()
         self.dragging = True
         self.last_touch_point = point
         self.owner.route_touch(self.session, 1, *point, from_master=True)

@@ -114,9 +114,17 @@ class TouchCoordinateTests(unittest.TestCase):
             return udid
 
     def _view(self, view_type: type[DeviceTile] | type[MasterView]):
+        class Canvas:
+            def __init__(self) -> None:
+                self.focus_calls = 0
+
+            def focus_set(self) -> None:
+                self.focus_calls += 1
+
         view = view_type.__new__(view_type)
         view.owner = self.Owner()
         view.session = SimpleNamespace(udid="test-touch-device")
+        view.canvas = Canvas()
         view.image_bounds = (10, 20, 110, 220)
         view.dragging = False
         view.last_touch_point = None
@@ -150,6 +158,7 @@ class TouchCoordinateTests(unittest.TestCase):
                 )
                 self.assertFalse(view.dragging)
                 self.assertIsNone(view.last_touch_point)
+                self.assertEqual(1, view.canvas.focus_calls)
 
     def test_release_outside_canvas_uses_last_valid_coordinate(self) -> None:
         for view_type in (DeviceTile, MasterView):
