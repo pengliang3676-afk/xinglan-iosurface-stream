@@ -173,6 +173,12 @@ class ImeWorkerClient:
                     message[2],
                     message[3],
                 )
+            elif kind == "caret_position" and len(message) >= 3:
+                LOGGER.info(
+                    "IME native caret target=%s,%s",
+                    message[1],
+                    message[2],
+                )
         process = self._process
         if process is not None and process.poll() is not None:
             try:

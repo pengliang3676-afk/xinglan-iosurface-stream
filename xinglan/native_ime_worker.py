@@ -10,6 +10,7 @@ from typing import Any
 HOST_CLASS_NAME = "XinglanNativeImeHost"
 HOST_WIDTH = 12
 HOST_HEIGHT = 24
+HOST_ALPHA = 1
 FOLLOW_TIMER_MS = 30
 
 WS_POPUP = 0x80000000
@@ -19,10 +20,12 @@ ES_LEFT = 0x0000
 ES_AUTOHSCROLL = 0x0080
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_TOPMOST = 0x00000008
+WS_EX_LAYERED = 0x00080000
 
 SW_SHOW = 5
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
+LWA_ALPHA = 0x00000002
 GWLP_WNDPROC = -4
 GA_ROOT = 2
 
@@ -50,6 +53,9 @@ EC_RIGHTMARGIN = 0x0002
 CFS_FORCE_POSITION = 0x0020
 CFS_CANDIDATEPOS = 0x0040
 GCS_COMPSTR = 0x0008
+EVENT_OBJECT_LOCATIONCHANGE = 0x800B
+OBJID_CARET = -8
+CHILDID_SELF = 0
 
 COLOR_WINDOW = 5
 DEFAULT_GUI_FONT = 17
@@ -274,6 +280,19 @@ class NativeImeHost:
             ctypes.c_int,
             wintypes.UINT,
         ]
+        self.user32.SetLayeredWindowAttributes.argtypes = [
+            wintypes.HWND,
+            wintypes.COLORREF,
+            wintypes.BYTE,
+            wintypes.DWORD,
+        ]
+        self.user32.SetCaretPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.user32.NotifyWinEvent.argtypes = [
+            wintypes.DWORD,
+            wintypes.HWND,
+            ctypes.c_long,
+            ctypes.c_long,
+        ]
         self.user32.SendMessageW.argtypes = [
             wintypes.HWND,
             wintypes.UINT,
@@ -309,7 +328,6 @@ class NativeImeHost:
             ctypes.c_int,
         ]
         self.user32.SetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
-        self.user32.HideCaret.argtypes = [wintypes.HWND]
         self.imm32.ImmGetContext.argtypes = [wintypes.HWND]
         self.imm32.ImmGetContext.restype = wintypes.HANDLE
         self.imm32.ImmReleaseContext.argtypes = [wintypes.HWND, wintypes.HANDLE]
@@ -370,7 +388,7 @@ class NativeImeHost:
         )
         owner = wintypes.HWND(self.owner_hwnd) if self.owner_hwnd else None
         host = self.user32.CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
             HOST_CLASS_NAME,
             "",
             WS_POPUP | WS_VISIBLE,
@@ -387,6 +405,13 @@ class NativeImeHost:
             raise ctypes.WinError(ctypes.get_last_error())
         self.host_hwnd = int(host)
         _HOSTS[self.host_hwnd] = self
+        if not self.user32.SetLayeredWindowAttributes(
+            wintypes.HWND(self.host_hwnd),
+            0,
+            HOST_ALPHA,
+            LWA_ALPHA,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
 
         edit = self.user32.CreateWindowExW(
             0,
@@ -453,8 +478,26 @@ class NativeImeHost:
             )
             self.last_position = target
             force_ime = True
+            emit("caret_position", target[0], target[1])
         if force_ime:
             self.apply_ime_anchor()
+            self.publish_caret_location()
+
+    def publish_caret_location(self) -> None:
+        """Keep the caret shown to RDP while publishing its new screen rect."""
+
+        if not self.edit_hwnd:
+            return
+        edit = wintypes.HWND(self.edit_hwnd)
+        # The caret remains logically visible; alpha=1 hides its pixels without
+        # removing the location signal consumed by mstsc/local IME handling.
+        self.user32.SetCaretPos(1, 2)
+        self.user32.NotifyWinEvent(
+            EVENT_OBJECT_LOCATIONCHANGE,
+            edit,
+            OBJID_CARET,
+            CHILDID_SELF,
+        )
 
     def apply_ime_anchor(self) -> bool:
         if not self.edit_hwnd:
@@ -494,6 +537,9 @@ class NativeImeHost:
         self.user32.SetActiveWindow(wintypes.HWND(self.host_hwnd))
         self.user32.SetFocus(wintypes.HWND(self.edit_hwnd))
         self.apply_ime_anchor()
+        self.publish_caret_location()
+        if self.last_position is not None:
+            emit("caret_position", self.last_position[0], self.last_position[1])
         if not self.ready_emitted:
             self.ready_emitted = True
             emit("ready")
@@ -547,10 +593,8 @@ class NativeImeHost:
     def handle_edit_message(self, message: int, wparam: int, lparam: int) -> int:
         if message == WM_SETFOCUS:
             result = self._call_original_edit(message, wparam, lparam)
-            # Keep the real Win32 caret and its geometry for TSF/Sogou, but do
-            # not paint the thin white caret over Xinglan's control divider.
-            self.user32.HideCaret(wintypes.HWND(self.edit_hwnd))
             self.apply_ime_anchor()
+            self.publish_caret_location()
             return result
         if message == WM_IME_STARTCOMPOSITION:
             self.composing = True

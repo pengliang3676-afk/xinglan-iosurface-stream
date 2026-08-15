@@ -50,7 +50,10 @@ class NativeImeWorkerTests(unittest.TestCase):
         self.assertIn('"EDIT"', source)
         self.assertIn("WM_IME_STARTCOMPOSITION", source)
         self.assertIn("WM_IME_ENDCOMPOSITION", source)
-        self.assertIn("HideCaret", source)
+        self.assertIn("HOST_ALPHA = 1", source)
+        self.assertIn("SetLayeredWindowAttributes", source)
+        self.assertIn("NotifyWinEvent", source)
+        self.assertNotIn("HideCaret", source)
         self.assertNotIn("SetWinEventHook", source)
         self.assertNotIn("EnumWindows", source)
 
