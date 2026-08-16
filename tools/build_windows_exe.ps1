@@ -91,7 +91,7 @@ $imeArgs = @(
 if ($LASTEXITCODE -ne 0) { throw "主程序构建失败" }
 
 & $PythonExe -m PyInstaller @imeArgs `
-    --console --onefile --name "星澜输入" `
+    --console --onedir --contents-directory "_ime_runtime" --name "星澜输入" `
     --distpath $distRoot `
     --workpath (Join-Path $workRoot "ime-work") `
     --specpath (Join-Path $workRoot "ime-spec") `
@@ -99,7 +99,9 @@ if ($LASTEXITCODE -ne 0) { throw "主程序构建失败" }
 if ($LASTEXITCODE -ne 0) { throw "输入助手构建失败" }
 
 $mainFolder = Join-Path $distRoot $mainName
-Copy-Item -LiteralPath (Join-Path $distRoot "星澜输入.exe") -Destination $mainFolder -Force
+$imeFolder = Join-Path $distRoot "星澜输入"
+Copy-Item -LiteralPath (Join-Path $imeFolder "星澜输入.exe") -Destination $mainFolder -Force
+Copy-Item -LiteralPath (Join-Path $imeFolder "_ime_runtime") -Destination $mainFolder -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "assets") -Destination $mainFolder -Recurse -Force
 if ($E5Optimized) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "profiles\E5_RENDER_PROFILE") -Destination $mainFolder -Force

@@ -30,5 +30,19 @@ class PerformanceTests(unittest.TestCase):
         self.assertIn('"星澜_双路E5优化版"', build_source)
         self.assertIn('"星澜_双路E5"', build_source)
 
+    def test_ime_helper_uses_onedir_without_c_drive_temp_extraction(self) -> None:
+        build_source = (PROJECT / "tools" / "build_windows_exe.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        ime_build = build_source.split(
+            '& $PythonExe -m PyInstaller @imeArgs `', 1
+        )[1].split("if ($LASTEXITCODE -ne 0)", 1)[0]
+        self.assertIn('--console --onedir --contents-directory "_ime_runtime"', ime_build)
+        self.assertNotIn("--onefile", ime_build)
+        self.assertIn(
+            'Copy-Item -LiteralPath (Join-Path $imeFolder "_ime_runtime")',
+            build_source,
+        )
+
 if __name__ == "__main__":
     unittest.main()
