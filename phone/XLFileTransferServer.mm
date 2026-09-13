@@ -62,11 +62,14 @@ static void XLSendJsonLine(int client, NSDictionary *payload) {
     XLFileWriteAll(client, line.bytes, line.length);
 }
 
+static NSString *XLTransferDocumentsDirectory(void);
+
 static NSString *XLResolveHomePath(NSString *rawPath) {
     NSString *path = rawPath;
-    if (!path.length) return @"/var/mobile/Documents";
-    if ([path isEqualToString:@"我的iPhone"] || [path isEqualToString:@"文件/我的iPhone"]) {
-        return @"/var/mobile/Documents";
+    if (!path.length) return XLTransferDocumentsDirectory();
+    if ([path isEqualToString:@"我的iPhone"] || [path isEqualToString:@"文件/我的iPhone"] ||
+        [path isEqualToString:@"/var/mobile/Documents"]) {
+        return XLTransferDocumentsDirectory();
     }
     if ([path hasPrefix:@"~"]) {
         path = [@"/var/mobile" stringByAppendingPathComponent:[path substringFromIndex:1]];
