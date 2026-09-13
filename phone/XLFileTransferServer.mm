@@ -6,6 +6,8 @@
 #import <UIKit/UIKit.h>
 
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
 #include <netinet/in.h>
 #include <pwd.h>
@@ -182,12 +184,10 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
                     @"size" : @(0),
                 }];
             } else {
-                // 检查文件是否可以读取，不能读取的跳过，不加入清单
-                NSFileHandle *testHandle = [NSFileHandle fileHandleForReadingAtPath:fullPath];
-                if (!testHandle) {
+                // 用 access() 系统调用检查可读性，不创建 Objective-C 对象
+                if (access([fullPath fileSystemRepresentation], R_OK) != 0) {
                     continue;
                 }
-                [testHandle closeFile];
                 NSDictionary *attrs = [manager attributesOfItemAtPath:fullPath error:nil];
                 unsigned long long size = [attrs fileSize];
                 totalSize += size;
@@ -223,31 +223,32 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
     uint32_t manifestLenBE = htonl((uint32_t)manifestData.length);
     if (!XLFileWriteAll(client, &manifestLenBE, sizeof(manifestLenBE))) return;
     if (!XLFileWriteAll(client, manifestData.bytes, manifestData.length)) return;
+    // 参照 libVNCServer TightVNC 文件传输实现：底层 open/read + 栈上固定缓冲区
+    // 整个下载过程只有一个固定栈缓冲区，零 Objective-C 堆对象，杜绝后台线程内存累积
+    static const size_t XLDownloadChunkSize = 64U * 1024U;  // 64KB
+    uint8_t chunkBuffer[XLDownloadChunkSize];
     for (NSString *filePath in filePaths) {
-        NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:filePath];
-        if (!handle) {
-            // 跳过无法读取的文件，不中断整个下载
+        int fd = open([filePath fileSystemRepresentation], O_RDONLY);
+        if (fd < 0) {
             skippedCount++;
             continue;
         }
-        @try {
-            while (true) {
-                @autoreleasepool {
-                    NSData *chunk = [handle readDataOfLength:262144];
-                    if (!chunk.length) break;
-                    if (!XLFileWriteAll(client, chunk.bytes, chunk.length)) {
-                        [handle closeFile];
-                        return;
-                    }
-                }
+        BOOL fileOK = YES;
+        while (fileOK) {
+            ssize_t bytesRead = read(fd, chunkBuffer, XLDownloadChunkSize);
+            if (bytesRead < 0) {
+                if (errno == EINTR) continue;  // 被信号中断则重试
+                fileOK = NO;
+                break;
             }
-            [handle closeFile];
-        } @catch (NSException *exception) {
-            @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
-            // 跳过读取异常的文件，不中断整个下载
-            skippedCount++;
-            continue;
+            if (bytesRead == 0) break;  // 文件结束
+            if (!XLFileWriteAll(client, chunkBuffer, (size_t)bytesRead)) {
+                close(fd);
+                return;
+            }
         }
+        close(fd);
+        if (!fileOK) skippedCount++;
     }
     XLSendJsonLine(client, @{
         @"success" : @(YES),
