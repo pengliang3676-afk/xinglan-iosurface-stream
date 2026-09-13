@@ -29,6 +29,7 @@ from xinglan.device_actions import (  # noqa: E402
 )
 from xinglan.device_groups import DeviceGroupStore  # noqa: E402
 from xinglan.file_transfer import send_file_to_devices  # noqa: E402
+from xinglan.file_download import download_folder, list_directory  # noqa: E402
 from xinglan.ime_worker_client import ImeWorkerClient  # noqa: E402
 from xinglan.keyboard_input import map_keypress  # noqa: E402
 from xinglan.music_player import MusicPlaybackError, WindowsMusicPlayer  # noqa: E402
@@ -41,8 +42,12 @@ from xinglan.control_protocol import SystemAction  # noqa: E402
 from xinglan.session import DeviceSession  # noqa: E402
 from xinglan.usb_repair import (  # noqa: E402
     UsbRepairResult,
+    WindowsIphone,
     discover_windows_iphone_count,
+    discover_windows_iphones,
+    load_usb_topology,
     repair_usb,
+    save_usb_topology,
 )
 
 
@@ -56,8 +61,9 @@ BRAND_BANNER_HEIGHT = 36
 BRAND_BANNER_WIDTH = 568
 BRAND_BANNER_REL_X = 0.4705
 STATUS_BLOCK_WIDTH = 330
-LEFT_RUNTIME_STATUS_WIDTH = 260
 WINDOWS_USB_REFRESH_MS = 30_000
+AUTO_USB_REPAIR_COOLDOWN_SECONDS = 60.0
+AUTO_USB_REPAIR_MAX_ATTEMPTS = 2
 MOTTO_LINE_ONE = "日日精进，久久为功；功不唐捐，玉汝于成"
 MOTTO_LINE_TWO = "道阻且长，行则将至；行而不辍，未来可期"
 RIGHT_PANEL_WIDTH = 360
@@ -76,11 +82,23 @@ MAIN_BUTTON_FONT = ("Microsoft YaHei UI", 10, "bold")
 WALL_GAP = 3
 DISPLAY_INTERVAL_MS = 40
 E5_RENDER_PROFILE = (PROJECT_DIR / "E5_RENDER_PROFILE").is_file()
+SMOOTH_RENDER_PROFILE = (PROJECT_DIR / "SMOOTH_RENDER_PROFILE").is_file()
+GROUP_BUTTONS_PROFILE = (PROJECT_DIR / "GROUP_BUTTONS_PROFILE").is_file()
+GROUP_ONECLICK_PROFILE = (PROJECT_DIR / "GROUP_ONECLICK_PROFILE").is_file()
+GROUP_TWO_STEP_PROFILE = (PROJECT_DIR / "GROUP_TWO_STEP_PROFILE").is_file()
+OTP_PASTE_PROFILE = (PROJECT_DIR / "OTP_PASTE_PROFILE").is_file()
+TROLLVNC_OTP_PASTE_PROFILE = (
+    PROJECT_DIR / "TROLLVNC_OTP_PASTE_PROFILE"
+).is_file()
+FLICKER_FREE_WALL_PROFILE = (PROJECT_DIR / "FLICKER_FREE_WALL_PROFILE").is_file()
+AUTO_USB_REPAIR_PROFILE = (PROJECT_DIR / "AUTO_USB_REPAIR_PROFILE").is_file()
 TILE_RESAMPLING = (
     Image.Resampling.BILINEAR
-    if E5_RENDER_PROFILE
+    if E5_RENDER_PROFILE or SMOOTH_RENDER_PROFILE
     else Image.Resampling.LANCZOS
 )
+RENDER_SLICE_INTERVAL_MS = 10
+RENDER_TILES_PER_SLICE = 2
 LOGGER = logging.getLogger("xinglan.app")
 
 
@@ -339,6 +357,9 @@ class DeviceTile:
         self.render_size = (0, 0)
         self.image_bounds = (0, 0, tile_width, tile_height)
         self.placeholder_text = ""
+        self._connected_state: bool | None = None
+        self._status_presentation: tuple[str, str] | None = None
+        self._title_text: str | None = None
 
         # 固定卡片外框。帧率/延迟文字每秒变化时，不允许Tk重新计算卡片宽度。
         self.frame = tk.Frame(
@@ -529,6 +550,9 @@ class DeviceTile:
         )
 
     def set_connected(self, connected: bool) -> None:
+        if connected == getattr(self, "_connected_state", None):
+            return
+        self._connected_state = connected
         self.start_button.configure(state="disabled" if connected else "normal")
         self.stop_button.configure(state="normal" if connected else "disabled")
         self.master_button.configure(state="normal" if connected else "disabled")
@@ -542,14 +566,19 @@ class DeviceTile:
             status_text = f"重连{stats.reconnects}"
         else:
             status_text = stats.status
-        self.status.configure(
-            text=status_text,
-            fg="#12b76a" if stats.status.startswith("投屏中") else "#f79009",
-        )
+        status_color = "#12b76a" if stats.status.startswith("投屏中") else "#f79009"
+        status_presentation = (status_text, status_color)
+        if status_presentation != getattr(self, "_status_presentation", None):
+            self.status.configure(text=status_text, fg=status_color)
+            self._status_presentation = status_presentation
         self.set_connected(self.owner.is_session_active(self.session.udid))
-        self.title.configure(
-            text=f"{self.index + 1:02d} · {self.owner.device_label(self.session.udid)} · {status_text}"
+        title_text = (
+            f"{self.index + 1:02d} · "
+            f"{self.owner.device_label(self.session.udid)} · {status_text}"
         )
+        if title_text != getattr(self, "_title_text", None):
+            self.title.configure(text=title_text)
+            self._title_text = title_text
         canvas_size = (max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()))
         if image is None:
             if sequence != self.last_sequence:
@@ -681,6 +710,8 @@ class EmptySlot:
         index: int,
         assigned_label: str = "",
     ) -> None:
+        self.index = index
+        self.assigned_label = assigned_label
         self.frame = tk.Frame(
             parent,
             bg="#050a11",
@@ -755,6 +786,7 @@ class MasterView:
         self.last_touch_point: tuple[float, float] | None = None
         self.photo: ImageTk.PhotoImage | None = None
         self.render_size = (0, 0)
+        self._status_presentation: tuple[str, str] | None = None
         width, height = MASTER_VIEW_SIZE
         self.image_bounds = (0, 0, width, height)
 
@@ -817,11 +849,18 @@ class MasterView:
         self.last_touch_point = None
         if session is None:
             self.title.configure(text="主控大画面")
-            self.status.configure(text="请选择主控手机", fg="#98a2b3")
+            self._set_status("请选择主控手机", "#98a2b3")
             self._show_placeholder("请选择主控手机")
             return
         self.title.configure(text=f"主控大画面 · {self.owner.device_label(session.udid)}")
-        self.status.configure(text="正在连接", fg="#f79009")
+        self._set_status("正在连接", "#f79009")
+
+    def _set_status(self, text: str, color: str) -> None:
+        presentation = (text, color)
+        if presentation == getattr(self, "_status_presentation", None):
+            return
+        self.status.configure(text=text, fg=color)
+        self._status_presentation = presentation
 
     def refresh(self) -> None:
         if self.session is None:
@@ -834,7 +873,7 @@ class MasterView:
         else:
             text = stats.status
             color = "#f79009"
-        self.status.configure(text=text, fg=color)
+        self._set_status(text, color)
         canvas_size = (max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()))
         if image is None or (sequence == self.last_sequence and canvas_size == self.render_size):
             return
@@ -970,6 +1009,8 @@ class XinglanApp:
         self.selected_udids: set[str] = set()
         self.tiles: dict[str, DeviceTile] = {}
         self.empty_slots: list[EmptySlot] = []
+        self.wall_items: dict[int, DeviceTile | EmptySlot] = {}
+        self._render_tile_cursor = 0
         self.missing_scans: dict[str, int] = {}
         self.master_udid: str | None = None
         self.sync_enabled = tk.BooleanVar(value=False)
@@ -982,6 +1023,16 @@ class XinglanApp:
         self._usb_repair_in_progress = False
         self._usb_count_in_progress = False
         self._usb_count_after_id: str | None = None
+        self._usb_topology_in_progress = False
+        self._usb_topology_path = PROJECT_DIR / "config" / "usb_topology.json"
+        self._usb_topology_snapshot: tuple[WindowsIphone, ...] = (
+            load_usb_topology(self._usb_topology_path)
+            if AUTO_USB_REPAIR_PROFILE
+            else ()
+        )
+        self._auto_usb_repair_attempts = 0
+        self._auto_usb_repair_last_attempt = 0.0
+        self._usb_repair_is_automatic = False
         self.windows_device_count: int | None = None
         self.usbmux_device_count = 0
         self._closing = False
@@ -1051,24 +1102,6 @@ class XinglanApp:
             motto_block, text=MOTTO_LINE_TWO, bg="#1d2939", fg="#d0d5dd",
             anchor="w", font=("Microsoft YaHei UI", 8),
         ).pack(fill="x")
-
-        # 原来的运行参数移到 Logo 左侧空位，不再挤占右侧设备数量区域。
-        runtime_status_block = tk.Frame(toolbar, bg="#1d2939")
-        runtime_status_block.place(
-            x=STATUS_BLOCK_WIDTH - 25,
-            y=1,
-            width=LEFT_RUNTIME_STATUS_WIDTH,
-            height=38,
-            anchor="nw",
-        )
-        tk.Label(
-            runtime_status_block,
-            textvariable=self.health,
-            bg="#1d2939",
-            fg="#d0d5dd",
-            anchor="sw",
-            font=("Microsoft YaHei UI", 8),
-        ).pack(fill="both", expand=True)
 
         # 四个顶部按钮与右侧主控栏共用同一条左右边界。
         # 这样“全部开屏”的左边缘会和下方“全选”严格对齐。
@@ -1226,44 +1259,115 @@ class XinglanApp:
         group_row = tk.Frame(self.controls, bg="#101828")
         group_row.grid(row=0, column=0, sticky="nsew", padx=2, pady=(2, 1))
         self.group_var = tk.StringVar(value="第1组")
-        group_selector_slot = tk.Frame(
-            group_row,
-            bg="#101828",
-            width=GROUP_SELECTOR_WIDTH,
-        )
-        group_selector_slot.pack(side="left", fill="y", padx=(0, 2))
-        group_selector_slot.pack_propagate(False)
-        self.group_combo = tk.Button(
-            group_selector_slot,
-            textvariable=self.group_var,
-            command=self._toggle_group_popup,
-            anchor="center",
-            bg="#f2f4f7",
-            fg="#101828",
-            activebackground="#f2f4f7",
-            activeforeground="#101828",
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-            padx=0,
-            takefocus=False,
-            font=MAIN_BUTTON_FONT,
-        )
         self.group_values: list[str] = []
         self.group_popup: tk.Toplevel | None = None
-        self.group_combo.pack(fill="both", expand=True)
+        self.group_buttons: dict[str, tk.Button] = {}
+        def build_group_buttons(parent: tk.Widget, command) -> None:
+            for index in range(1, self.max_groups + 1):
+                value = f"第{index}组"
+                button = tk.Button(
+                    parent,
+                    text=f"第\n{index}\n组",
+                    command=lambda selected=value: command(selected),
+                    anchor="center",
+                    justify="center",
+                    bg="#2e90fa",
+                    fg="white",
+                    activebackground="#2e90fa",
+                    activeforeground="white",
+                    relief="flat",
+                    borderwidth=0,
+                    highlightthickness=0,
+                    padx=0,
+                    pady=0,
+                    takefocus=False,
+                    font=MAIN_BUTTON_FONT,
+                )
+                # Every group receives the same expansion weight.  The deleted
+                # connect button leaves no reserved or blank column.
+                button.pack(
+                    side="left",
+                    fill="both",
+                    expand=True,
+                    padx=(0 if index == 1 else 1, 0 if index == self.max_groups else 1),
+                )
+                self.group_buttons[value] = button
+
+        if GROUP_ONECLICK_PROFILE or GROUP_TWO_STEP_PROFILE:
+            group_buttons_slot = tk.Frame(group_row, bg="#101828")
+            group_buttons_slot.pack(fill="both", expand=True)
+            group_command = (
+                self.activate_group_two_step
+                if GROUP_TWO_STEP_PROFILE
+                else self.activate_group_button
+            )
+            build_group_buttons(group_buttons_slot, group_command)
+        else:
+            group_selector_slot = tk.Frame(
+                group_row,
+                bg="#101828",
+                width=GROUP_SELECTOR_WIDTH,
+            )
+            group_selector_slot.pack(side="left", fill="y", padx=(0, 2))
+            group_selector_slot.pack_propagate(False)
+
+        if GROUP_BUTTONS_PROFILE and not (GROUP_ONECLICK_PROFILE or GROUP_TWO_STEP_PROFILE):
+            # 原下拉框位置改成当前组的连接/断开按钮。
+            self.group_button = tk.Button(
+                group_selector_slot,
+                text="连接本组",
+                command=self.toggle_current_group,
+                bg="#12b76a",
+                fg="white",
+                activebackground="#12b76a",
+                activeforeground="white",
+                relief="flat",
+                borderwidth=0,
+                highlightthickness=0,
+                takefocus=False,
+                font=MAIN_BUTTON_FONT,
+            )
+            self.group_button.pack(fill="both", expand=True)
+            group_buttons_slot = tk.Frame(group_row, bg="#101828")
+            group_buttons_slot.pack(side="left", fill="both", expand=True)
+            build_group_buttons(group_buttons_slot, self._select_group)
+        elif not (GROUP_ONECLICK_PROFILE or GROUP_TWO_STEP_PROFILE):
+            self.group_combo = tk.Button(
+                group_selector_slot,
+                textvariable=self.group_var,
+                command=self._toggle_group_popup,
+                anchor="center",
+                bg="#f2f4f7",
+                fg="#101828",
+                activebackground="#f2f4f7",
+                activeforeground="#101828",
+                relief="flat",
+                borderwidth=0,
+                highlightthickness=0,
+                padx=0,
+                takefocus=False,
+                font=MAIN_BUTTON_FONT,
+            )
+            self.group_combo.pack(fill="both", expand=True)
+            self.group_button = tk.Button(
+                group_row,
+                text="连接本组",
+                command=self.toggle_current_group,
+                bg="#12b76a",
+                fg="white",
+                activebackground="#12b76a",
+                activeforeground="white",
+                relief="flat",
+                borderwidth=0,
+                highlightthickness=0,
+                takefocus=False,
+                font=MAIN_BUTTON_FONT,
+            )
+            self.group_button.pack(side="left", fill="both", expand=True)
+
         # 程序刚打开时就完整显示全部分组，不能等设备扫描或打开分组设置后
         # 才补齐菜单。默认 60 台对应第1组至第6组。
         self._refresh_group_selector()
-        self.group_button = tk.Button(
-            group_row, text="连接本组", command=self.toggle_current_group,
-            bg="#12b76a", fg="white",
-            activebackground="#12b76a", activeforeground="white",
-            relief="flat", borderwidth=0, highlightthickness=0,
-            takefocus=False,
-            font=MAIN_BUTTON_FONT,
-        )
-        self.group_button.pack(side="left", fill="both", expand=True)
 
         # 键盘输入由独立的轻量IME进程接收；它不加载投屏或分组代码。
 
@@ -1285,44 +1389,27 @@ class XinglanApp:
             )
 
         file_row = fixed_row(self.controls, 2)
-        music_button_slot = tk.Frame(
-            file_row,
-            bg="#101828",
-            width=GROUP_SELECTOR_WIDTH,
-        )
-        music_button_slot.pack(side="left", fill="y", padx=(0, 2))
-        music_button_slot.pack_propagate(False)
-        self.music_button = tk.Button(
-            music_button_slot,
-            text="音乐",
-            command=self.toggle_music,
-            bg="#2e90fa",
-            fg="white",
-            activebackground="#2e90fa",
-            activeforeground="white",
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-            takefocus=False,
-            font=MAIN_BUTTON_FONT,
-        )
-        self.music_button.pack(fill="both", expand=True)
         tk.Button(
-            file_row, text="文件传输", command=self.open_file_transfer,
+            file_row, text="传到手机", command=self.open_file_transfer,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
             font=MAIN_BUTTON_FONT,
-        ).pack(side="left", fill="both", expand=True)
+        ).pack(side="left", fill="both", expand=True, padx=(0, 1))
+        tk.Button(
+            file_row, text="手机下载", command=self.open_phone_download,
+            bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
+            font=MAIN_BUTTON_FONT,
+        ).pack(side="left", fill="both", expand=True, padx=(1, 0))
 
         mode_row = tk.Frame(self.controls, bg="#101828")
         mode_row.grid(row=3, column=0, sticky="nsew", padx=2, pady=(1, 2))
         tk.Button(
-            mode_row, text="全部投屏",
+            mode_row, text="本组开屏", command=self.wake_current_group,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
             takefocus=False,
             font=MAIN_BUTTON_FONT,
         ).pack(side="left", fill="both", expand=True, padx=(0, 1))
         tk.Button(
-            mode_row, text="全部停屏",
+            mode_row, text="本组锁屏", command=self.lock_current_group,
             bg="#2e90fa", fg="white", relief="flat", borderwidth=0,
             takefocus=False,
             font=MAIN_BUTTON_FONT,
@@ -1352,8 +1439,13 @@ class XinglanApp:
     def _all_online_udids(self) -> list[str]:
         return sorted(self.sessions)
 
-    def _run_all_device_action(self, action: str, label: str) -> None:
-        udids = self._all_online_udids()
+    def _run_device_action(
+        self,
+        udids: list[str],
+        action: str,
+        label: str,
+    ) -> None:
+        udids = list(dict.fromkeys(udids))
         if not udids:
             self.summary.set(f"{label}：当前没有USB在线手机")
             return
@@ -1387,11 +1479,30 @@ class XinglanApp:
 
         future.add_done_callback(finished)
 
+    def _run_all_device_action(self, action: str, label: str) -> None:
+        self._run_device_action(self._all_online_udids(), action, label)
+
     def wake_all_devices(self) -> None:
         self._run_all_device_action("wake", "全部开屏")
 
     def sleep_all_devices(self) -> None:
         self._run_all_device_action("sleep", "全部熄屏")
+
+    def wake_current_group(self) -> None:
+        group = self.group_var.get().strip() or "当前组"
+        self._run_device_action(
+            self._current_group_udids(),
+            "wake",
+            f"{group}开屏",
+        )
+
+    def lock_current_group(self) -> None:
+        group = self.group_var.get().strip() or "当前组"
+        self._run_device_action(
+            self._current_group_udids(),
+            "sleep",
+            f"{group}锁屏",
+        )
 
     def select_all_devices(self) -> None:
         targets = self._current_group_udids()
@@ -1463,10 +1574,44 @@ class XinglanApp:
         current = min(self._current_group_index(), self.max_groups - 1)
         self._set_group_menu_values(values)
         self.group_var.set(values[current])
+        self._refresh_group_selection_buttons()
 
     def _set_group_menu_values(self, values: list[str]) -> None:
         self.group_values = list(values)
         self._hide_group_popup()
+
+    def _refresh_group_selection_buttons(self) -> None:
+        selected = self.group_var.get()
+        for value, button in getattr(self, "group_buttons", {}).items():
+            is_selected = value == selected
+            connected_count = 0
+            target_count = 0
+            if GROUP_ONECLICK_PROFILE or GROUP_TWO_STEP_PROFILE:
+                try:
+                    group_number = int(value.removeprefix("第").removesuffix("组"))
+                except ValueError:
+                    group_number = 0
+                positioned = self.group_store.positioned_devices(self.sessions, group_number)
+                target_udids = [udid for _, udid in positioned]
+                target_count = len(target_udids)
+                connected_count = sum(udid in self.active_udids for udid in target_udids)
+            all_connected = target_count > 0 and connected_count == target_count
+            partially_connected = GROUP_TWO_STEP_PROFILE and 0 < connected_count < target_count
+            if all_connected or (GROUP_ONECLICK_PROFILE and connected_count > 0):
+                background = "#12b76a"
+            elif partially_connected:
+                background = "#f79009"
+            elif is_selected:
+                background = "#f2f4f7"
+            else:
+                background = "#2e90fa"
+            foreground = "#101828" if is_selected and connected_count == 0 else "white"
+            button.configure(
+                bg=background,
+                fg=foreground,
+                activebackground=background,
+                activeforeground=foreground,
+            )
 
     def _toggle_group_popup(self) -> None:
         popup = self.group_popup
@@ -1488,10 +1633,8 @@ class XinglanApp:
         item_height = 27
         height = item_height * len(self.group_values) + 2
         x = self.group_combo.winfo_rootx()
-        y = self.group_combo.winfo_rooty() + self.group_combo.winfo_height()
-        screen_height = self.root.winfo_screenheight()
-        if y + height > screen_height:
-            y = max(0, self.group_combo.winfo_rooty() - height)
+        # 分组按钮保持原位，整个分组列表固定在按钮上方展开。
+        y = max(0, self.group_combo.winfo_rooty() - height)
 
         popup = tk.Toplevel(self.root)
         popup.withdraw()
@@ -1628,18 +1771,27 @@ class XinglanApp:
         if self.group_var.get() == value:
             return
         self.group_var.set(value)
+        self._refresh_group_selection_buttons()
         self._group_changed()
 
     def _group_changed(self, _event: tk.Event | None = None) -> None:
         self.ime_worker.deactivate()
         self._ime_source = None
+        # A group switch is also an explicit projection boundary.  Keeping the
+        # old group alive after its canvases disappear creates hidden video and
+        # RFB sessions that continue consuming USB/CPU resources.
+        stopped = self._stop_udids(list(self.active_udids))
         self.master_udid = None
         self._rebuild_tiles()
         self.summary.set(
-            f"已切换到{self.group_var.get()}，点击连接本组后才开始投屏"
+            f"已切换到{self.group_var.get()}，已自动断开 {stopped} 台；"
+            "点击连接本组后才开始投屏"
         )
 
     def _refresh_group_button(self) -> None:
+        if GROUP_ONECLICK_PROFILE or GROUP_TWO_STEP_PROFILE:
+            self._refresh_group_selection_buttons()
+            return
         connected = any(udid in self.active_udids for udid in self._current_group_udids())
         color = "#912f20" if connected else "#12b76a"
         self.group_button.configure(
@@ -1984,6 +2136,72 @@ class XinglanApp:
         else:
             self.start_current_group()
 
+    def activate_group_button(self, value: str) -> None:
+        """Select/connect one group, or disconnect it when clicked again."""
+        same_group = self.group_var.get() == value
+        current_connected = same_group and any(
+            udid in self.active_udids for udid in self._current_group_udids()
+        )
+
+        self.ime_worker.deactivate()
+        self._ime_source = None
+        # Always stop the complete active set first.  This is deliberately
+        # stronger than stopping only the visible group: stale or forgotten
+        # sessions can never survive as hidden projection work.
+        stopped = self._stop_udids(list(self.active_udids))
+        self.master_udid = None
+
+        if not same_group:
+            self.group_var.set(value)
+        self._refresh_group_selection_buttons()
+
+        if current_connected:
+            self._rebuild_tiles()
+            self.summary.set(f"{value}已断开 {stopped} 台投屏，未保留隐藏投屏")
+            return
+
+        targets = self._current_group_udids()
+        if not targets:
+            self._rebuild_tiles()
+            self.summary.set(f"{value}没有USB手机；已断开原投屏，未保留隐藏投屏")
+            return
+        self.start_current_group()
+
+    def activate_group_two_step(self, value: str) -> None:
+        """First click selects a group; a repeat click connects or disconnects it."""
+        same_group = self.group_var.get() == value
+        if not same_group:
+            self.ime_worker.deactivate()
+            self._ime_source = None
+            # Selecting another group is always a hard projection boundary.
+            # Stop the complete active set so no invisible old group survives.
+            stopped = self._stop_udids(list(self.active_udids))
+            self.master_udid = None
+            self.group_var.set(value)
+            self._refresh_group_selection_buttons()
+            self._rebuild_tiles()
+            self.summary.set(
+                f"已选择{value}，未开始整组投屏；已断开原投屏 {stopped} 台"
+            )
+            return
+
+        targets = self._current_group_udids()
+        target_set = set(targets)
+        all_connected = bool(targets) and target_set.issubset(self.active_udids)
+        if all_connected:
+            self.ime_worker.deactivate()
+            self._ime_source = None
+            # Include any unexpected sessions outside the visible group too.
+            stopped = self._stop_udids(list(self.active_udids))
+            self.master_udid = None
+            self._rebuild_tiles()
+            self.summary.set(f"{value}已断开 {stopped} 台投屏，未保留隐藏投屏")
+            return
+
+        # Zero or partially connected: retain current individual sessions and
+        # let start_current_group connect only the missing phones.
+        self.start_current_group()
+
     def route_system_action(self, action: SystemAction) -> None:
         target_udids = self._selected_control_udids()
         if not target_udids:
@@ -2020,6 +2238,16 @@ class XinglanApp:
 
     def switch_window(self) -> None:
         self.route_system_action(SystemAction.APP_SWITCHER)
+
+    @staticmethod
+    def _format_size(size: int) -> str:
+        if size >= 1024 * 1024 * 1024:
+            return f"{size / (1024 ** 3):.2f} GB"
+        if size >= 1024 * 1024:
+            return f"{size / (1024 ** 2):.1f} MB"
+        if size >= 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size} B"
 
     def open_file_transfer(self) -> None:
         # 打开窗口时固定当前下拉框选中的一组。文件只发给这一组中
@@ -2310,6 +2538,271 @@ class XinglanApp:
         window.protocol("WM_DELETE_WINDOW", close_window)
         refresh_target_text()
 
+    def open_phone_download(self) -> None:
+        """手机→电脑：浏览手机文件系统，选择文件夹下载到桌面。"""
+        group_number = self._current_group_index() + 1
+        window = tk.Toplevel(self.root)
+        window.title("手机下载到电脑")
+        window.geometry("640x620")
+        window.resizable(False, False)
+        window.configure(bg="#101828")
+        window.transient(self.root)
+        window.update_idletasks()
+        parent_x = self.root.winfo_rootx()
+        parent_y = self.root.winfo_rooty()
+        parent_w = self.root.winfo_width()
+        parent_h = self.root.winfo_height()
+        dialog_w = window.winfo_width()
+        dialog_h = window.winfo_height()
+        center_x = parent_x + max(0, (parent_w - dialog_w) // 2)
+        center_y = parent_y + max(0, (parent_h - dialog_h) // 2)
+        window.geometry(f"{dialog_w}x{dialog_h}+{center_x}+{center_y}")
+
+        # 默认路径：我的iPhone = /var/mobile/Documents
+        DEFAULT_PATH = "/var/mobile/Documents"
+        current_path = tk.StringVar(value=DEFAULT_PATH)
+        display_path = tk.StringVar(value="文件 > 我的iPhone")
+        selected_folder = tk.StringVar(value="")
+        selected_meta = tk.StringVar(value="尚未选择文件夹")
+        save_dir = tk.StringVar(value=str(Path.home() / "Desktop"))
+        progress_text = tk.StringVar(value="请选择手机后点击刷新，浏览文件列表")
+        downloading = tk.BooleanVar(value=False)
+        list_entries: list[dict] = []
+
+        # 获取当前组已连接投屏的手机
+        def connected_devices() -> list[tuple[str, str]]:
+            result = []
+            for udid in self._current_group_udids():
+                if udid in self.active_udids:
+                    result.append((udid, self.device_label(udid)))
+            return result
+
+        devices = connected_devices()
+        device_var = tk.StringVar()
+        if devices:
+            device_var.set(devices[0][1])
+
+        def current_udid() -> str | None:
+            for udid, label in devices:
+                if label == device_var.get():
+                    return udid
+            return None
+
+        def refresh_list() -> None:
+            udid = current_udid()
+            if not udid:
+                progress_text.set("没有已连接投屏的手机")
+                return
+            path = current_path.get()
+            progress_text.set(f"正在读取 {path} …")
+            for item in file_list.get_children():
+                file_list.delete(item)
+            list_entries.clear()
+
+            def callback(result) -> None:
+                if isinstance(result, Exception):
+                    progress_text.set(f"读取失败：{result}")
+                    return
+                if not result.success:
+                    progress_text.set(f"读取失败：{result.message}")
+                    return
+                for entry in result.entries:
+                    icon = "📁" if entry.directory else "📄"
+                    size_text = "—" if entry.directory else _format_size(entry.size)
+                    file_list.insert(
+                        "", "end",
+                        values=(f"{icon} {entry.name}", size_text),
+                        tags=("dir" if entry.directory else "file",),
+                    )
+                    list_entries.append({"name": entry.name, "directory": entry.directory, "size": entry.size})
+                progress_text.set(f"当前路径：{display_path.get()}（{len(result.entries)} 项）")
+
+            self._run_async_action(lambda: list_directory(udid, path), callback)
+
+        def on_double_click(_event) -> None:
+            selection = file_list.selection()
+            if not selection:
+                return
+            index = file_list.index(selection[0])
+            if index >= len(list_entries):
+                return
+            entry = list_entries[index]
+            if not entry["directory"]:
+                return
+            new_path = current_path.get().rstrip("/") + "/" + entry["name"]
+            current_path.set(new_path)
+            display_path.set(f"文件 > 我的iPhone > {entry['name']}")
+            selected_folder.set("")
+            selected_meta.set("尚未选择文件夹")
+            refresh_list()
+
+        def on_select(_event) -> None:
+            selection = file_list.selection()
+            if not selection:
+                return
+            index = file_list.index(selection[0])
+            if index >= len(list_entries):
+                return
+            entry = list_entries[index]
+            if entry["directory"]:
+                full_path = current_path.get().rstrip("/") + "/" + entry["name"]
+                selected_folder.set(full_path)
+                selected_meta.set(f"已选文件夹：{entry['name']}")
+            else:
+                selected_folder.set("")
+                selected_meta.set("请选择文件夹（文件不可单独下载）")
+
+        def go_parent() -> None:
+            path = current_path.get()
+            if path == DEFAULT_PATH or path == "/var/mobile" or path == "/":
+                return
+            parent = str(Path(path).parent)
+            current_path.set(parent)
+            if parent == DEFAULT_PATH:
+                display_path.set("文件 > 我的iPhone")
+            else:
+                display_path.set(f"文件 > 我的iPhone > {Path(parent).name}")
+            selected_folder.set("")
+            selected_meta.set("尚未选择文件夹")
+            refresh_list()
+
+        def go_path() -> None:
+            value = path_entry.get().strip()
+            if not value:
+                return
+            current_path.set(value)
+            display_path.set(value)
+            selected_folder.set("")
+            selected_meta.set("尚未选择文件夹")
+            refresh_list()
+
+        def choose_save_dir() -> None:
+            value = filedialog.askdirectory(parent=window, title="选择保存位置", initialdir=save_dir.get())
+            if value:
+                save_dir.set(value)
+
+        def start_download() -> None:
+            udid = current_udid()
+            if not udid:
+                progress_text.set("没有已连接投屏的手机")
+                return
+            folder = selected_folder.get()
+            if not folder:
+                progress_text.set("请先在列表中选择一个文件夹")
+                return
+            downloading.set(True)
+            download_btn.configure(state="disabled", text="正在下载…")
+            refresh_btn.configure(state="disabled")
+            parent_btn.configure(state="disabled")
+            progress_text.set(f"正在下载 {Path(folder).name} 到桌面…")
+            self.summary.set(f"正在从手机下载 {Path(folder).name} …")
+
+            def callback(result) -> None:
+                downloading.set(False)
+                download_btn.configure(state="normal", text="开始下载")
+                refresh_btn.configure(state="normal")
+                parent_btn.configure(state="normal")
+                if isinstance(result, Exception):
+                    msg = f"下载失败：{result}"
+                    progress_text.set(msg)
+                    self.summary.set(msg)
+                    messagebox.showerror("下载失败", str(result), parent=window)
+                    return
+                if not result.success:
+                    msg = f"下载失败：{result.message}"
+                    progress_text.set(msg)
+                    self.summary.set(msg)
+                    messagebox.showwarning("下载失败", result.message, parent=window)
+                    return
+                msg = f"下载完成：{result.total_files} 个文件，已保存到 {result.saved_path}"
+                progress_text.set(msg)
+                self.summary.set(f"手机下载完成：{Path(folder).name}（{result.total_files} 个文件）")
+                messagebox.showinfo("下载完成", msg, parent=window)
+
+            self._run_async_action(
+                lambda: download_folder(udid, folder, Path(save_dir.get())),
+                callback,
+            )
+
+        def close_window() -> None:
+            if downloading.get():
+                return
+            window.destroy()
+
+        # UI 构建
+        tk.Label(
+            window, text="从手机下载文件夹到电脑",
+            bg="#101828", fg="white", font=("Microsoft YaHei UI", 15, "bold"),
+        ).pack(anchor="w", padx=20, pady=(16, 10))
+
+        # 设备选择
+        device_row = tk.Frame(window, bg="#101828")
+        device_row.pack(fill="x", padx=20, pady=(0, 8))
+        tk.Label(device_row, text="手机：", bg="#101828", fg="#94a3b8", font=("Microsoft YaHei UI", 11)).pack(side="left")
+        device_menu = ttk.Combobox(
+            device_row, textvariable=device_var,
+            values=[label for _, label in devices],
+            state="readonly", width=30,
+        )
+        device_menu.pack(side="left", padx=(6, 0))
+
+        # 路径导航
+        nav_row = tk.Frame(window, bg="#101828")
+        nav_row.pack(fill="x", padx=20, pady=(0, 6))
+        parent_btn = tk.Button(nav_row, text="← 上一级", command=go_parent, bg="#1e293b", fg="#94a3b8", relief="flat", padx=10, pady=4, font=("Microsoft YaHei UI", 10))
+        parent_btn.pack(side="left", padx=(0, 6))
+        path_entry = tk.Entry(nav_row, textvariable=display_path, bg="#0c1728", fg="#edf7ff", relief="flat", insertbackground="#edf7ff", font=("Microsoft YaHei UI", 10))
+        path_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        tk.Button(nav_row, text="跳转", command=go_path, bg="#1e293b", fg="#94a3b8", relief="flat", padx=10, pady=4, font=("Microsoft YaHei UI", 10)).pack(side="left", padx=(0, 6))
+        refresh_btn = tk.Button(nav_row, text="刷新", command=refresh_list, bg="#1e293b", fg="#94a3b8", relief="flat", padx=10, pady=4, font=("Microsoft YaHei UI", 10))
+        refresh_btn.pack(side="left")
+
+        # 文件列表
+        list_frame = tk.Frame(window, bg="#0c1728", highlightbackground="#223a57", highlightthickness=1)
+        list_frame.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        file_list = ttk.Treeview(
+            list_frame, columns=("name", "size"),
+            show="headings", height=12,
+        )
+        file_list.heading("name", text="名称")
+        file_list.heading("size", text="大小")
+        file_list.column("name", width=440, anchor="w")
+        file_list.column("size", width=100, anchor="e")
+        file_list.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=file_list.yview)
+        scrollbar.pack(side="right", fill="y")
+        file_list.configure(yscrollcommand=scrollbar.set)
+        file_list.bind("<Double-1>", on_double_click)
+        file_list.bind("<<TreeviewSelect>>", on_select)
+        file_list.tag_configure("dir", foreground="#7dd3fc")
+        file_list.tag_configure("file", foreground="#cbd5e1")
+
+        # 选中状态
+        selected_row = tk.Frame(window, bg="#0c1728", highlightbackground="#223a57", highlightthickness=1)
+        selected_row.pack(fill="x", padx=20, pady=(0, 8))
+        tk.Label(selected_row, textvariable=selected_meta, bg="#0c1728", fg="#7dd3fc", font=("Microsoft YaHei UI", 10), anchor="w").pack(fill="x", padx=10, pady=5)
+
+        # 保存位置
+        save_row = tk.Frame(window, bg="#101828")
+        save_row.pack(fill="x", padx=20, pady=(0, 8))
+        tk.Label(save_row, text="保存到：", bg="#101828", fg="#94a3b8", font=("Microsoft YaHei UI", 11)).pack(side="left")
+        tk.Label(save_row, textvariable=save_dir, bg="#0c1728", fg="#edf7ff", font=("Microsoft YaHei UI", 10), anchor="w", padx=8, pady=4).pack(side="left", fill="x", expand=True, padx=(6, 6))
+        tk.Button(save_row, text="更改", command=choose_save_dir, bg="#1e293b", fg="#94a3b8", relief="flat", padx=12, pady=4, font=("Microsoft YaHei UI", 10)).pack(side="left")
+
+        # 进度和按钮
+        tk.Label(window, textvariable=progress_text, bg="#101828", fg="#84caff", anchor="w", font=("Microsoft YaHei UI", 10)).pack(fill="x", padx=20, pady=(0, 6))
+        actions = tk.Frame(window, bg="#101828")
+        actions.pack(side="bottom", fill="x", padx=20, pady=(0, 16))
+        tk.Button(actions, text="关闭", command=close_window, bg="#344054", fg="white", relief="flat", padx=22, pady=8, font=("Microsoft YaHei UI", 11)).pack(side="left")
+        download_btn = tk.Button(actions, text="开始下载", command=start_download, bg="#12b76a", fg="white", relief="flat", padx=28, pady=8, font=("Microsoft YaHei UI", 11, "bold"))
+        download_btn.pack(side="right")
+
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        if devices:
+            refresh_list()
+        else:
+            progress_text.set("当前组没有已连接投屏的手机")
+
     def _discover_devices(self) -> list[str]:
         return discover_usb_udids_stable(PROJECT_DIR)[: self.max_devices]
 
@@ -2324,7 +2817,7 @@ class XinglanApp:
 
     def scan_devices(self) -> None:
         """在后台扫描USB设备，避免60台枚举冻结Tk画面刷新。"""
-        if self._closing or self._scan_in_progress:
+        if self._closing or self._scan_in_progress or self._usb_repair_in_progress:
             return
         self._scan_in_progress = True
 
@@ -2347,12 +2840,26 @@ class XinglanApp:
             daemon=True,
         ).start()
 
-    def repair_usb_devices(self) -> None:
-        """Manually recover only the external hub branches missing from usbmux."""
+    def repair_usb_devices(self, *, automatic: bool = False) -> bool:
+        """Recover only affected external hub branches; never cycle a root hub."""
         if self._closing or self._usb_repair_in_progress:
-            return
+            return False
+        if automatic:
+            try:
+                elevated = bool(ctypes.windll.shell32.IsUserAnAdmin())
+            except (AttributeError, OSError):
+                elevated = False
+            if not elevated:
+                self.summary.set("检测到USB掉线：自动修复需要以管理员身份启动软件")
+                LOGGER.warning("automatic USB repair skipped: process is not elevated")
+                return False
         self._usb_repair_in_progress = True
-        self.summary.set("正在检查Windows与投屏USB通道…")
+        self._usb_repair_is_automatic = automatic
+        self.summary.set(
+            "检测到USB掉线，正在自动修复…"
+            if automatic
+            else "正在检查Windows与投屏USB通道…"
+        )
 
         def set_progress(text: str) -> None:
             try:
@@ -2363,14 +2870,26 @@ class XinglanApp:
         def worker() -> None:
             try:
                 result: tuple[UsbRepairResult | None, str | None] = (
-                    repair_usb(PROJECT_DIR, progress=set_progress),
+                    repair_usb(
+                        PROJECT_DIR,
+                        progress=set_progress,
+                        known_windows_iphones=(
+                            self._usb_topology_snapshot
+                            if AUTO_USB_REPAIR_PROFILE
+                            else ()
+                        ),
+                    ),
                     None,
                 )
             except Exception as exc:
                 LOGGER.exception("USB branch repair failed")
                 result = (None, str(exc))
             try:
-                self.root.after(0, lambda value=result: self._finish_usb_repair(value))
+                self.root.after(
+                    0,
+                    lambda value=result, is_auto=automatic:
+                        self._finish_usb_repair(value, automatic=is_auto),
+                )
             except tk.TclError:
                 pass
 
@@ -2379,17 +2898,22 @@ class XinglanApp:
             name="xinglan-usb-repair",
             daemon=True,
         ).start()
+        return True
 
     def _finish_usb_repair(
         self,
         result: tuple[UsbRepairResult | None, str | None],
+        *,
+        automatic: bool = False,
     ) -> None:
         self._usb_repair_in_progress = False
+        self._usb_repair_is_automatic = False
         if self._closing:
             return
         repair_result, error = result
         if error is not None or repair_result is None:
-            self.summary.set(f"USB修复失败：{error or '未知错误'}")
+            prefix = "USB自动修复失败" if automatic else "USB修复失败"
+            self.summary.set(f"{prefix}：{error or '未知错误'}")
             return
         if repair_result.cycled_branches == 0:
             self.summary.set(
@@ -2404,6 +2928,15 @@ class XinglanApp:
         self.usbmux_device_count = repair_result.after_count
         self._update_device_counts_text()
         self.scan_devices()
+        expected_count = len(self._usb_topology_snapshot)
+        if (
+            AUTO_USB_REPAIR_PROFILE
+            and
+            repair_result.after_count >= expected_count
+            and repair_result.windows_count >= expected_count
+        ):
+            self._auto_usb_repair_attempts = 0
+            self._capture_usb_topology(force=True)
 
     def _finish_device_scan(
         self,
@@ -2470,10 +3003,14 @@ class XinglanApp:
 
     def _update_device_counts_text(self) -> None:
         windows_text = "检测中" if self.windows_device_count is None else str(self.windows_device_count)
-        missing = (
-            max(0, self.windows_device_count - self.usbmux_device_count)
-            if self.windows_device_count is not None
-            else 0
+        expected_count = max(
+            len(self._usb_topology_snapshot),
+            self.windows_device_count or 0,
+        )
+        missing = max(
+            0,
+            expected_count - (self.windows_device_count or 0),
+            expected_count - self.usbmux_device_count,
         )
         self.device_counts.set(
             f"Windows {windows_text}台 · 投屏识别 {self.usbmux_device_count}台"
@@ -2481,6 +3018,100 @@ class XinglanApp:
         )
         color = "#f97066" if missing > 0 else "#d0d5dd"
         self.device_counts_label.configure(fg=color)
+
+    def _capture_usb_topology(self, *, force: bool = False) -> None:
+        """Capture the healthy phone-to-hub map only when a full scan is needed."""
+        if (
+            self._closing
+            or self._usb_topology_in_progress
+            or self._usb_repair_in_progress
+            or (self._usb_topology_snapshot and not force)
+        ):
+            return
+        self._usb_topology_in_progress = True
+
+        def worker() -> None:
+            try:
+                result: tuple[list[WindowsIphone] | None, str | None] = (
+                    discover_windows_iphones(),
+                    None,
+                )
+            except Exception as exc:
+                result = (None, str(exc))
+            try:
+                self.root.after(
+                    0,
+                    lambda value=result: self._finish_usb_topology_capture(value),
+                )
+            except tk.TclError:
+                pass
+
+        threading.Thread(
+            target=worker,
+            name="xinglan-usb-topology",
+            daemon=True,
+        ).start()
+
+    def _finish_usb_topology_capture(
+        self,
+        result: tuple[list[WindowsIphone] | None, str | None],
+    ) -> None:
+        self._usb_topology_in_progress = False
+        if self._closing:
+            return
+        phones, error = result
+        if error is not None or not phones:
+            LOGGER.warning("USB topology capture failed: %s", error or "empty result")
+            return
+        if self.windows_device_count is not None and len(phones) < self.windows_device_count:
+            LOGGER.warning(
+                "USB topology capture ignored: records=%s Windows=%s",
+                len(phones), self.windows_device_count,
+            )
+            return
+        if self._usb_topology_snapshot and len(phones) < len(self._usb_topology_snapshot):
+            LOGGER.warning(
+                "USB topology capture kept healthy snapshot: records=%s snapshot=%s",
+                len(phones), len(self._usb_topology_snapshot),
+            )
+            return
+        self._usb_topology_snapshot = tuple(phones)
+        try:
+            save_usb_topology(self._usb_topology_path, phones)
+        except OSError:
+            LOGGER.exception("failed to persist USB topology snapshot")
+        LOGGER.info("USB topology snapshot updated: devices=%s", len(phones))
+        if self.windows_device_count is not None:
+            self._consider_auto_usb_repair(self.windows_device_count)
+
+    def _consider_auto_usb_repair(self, windows_count: int) -> None:
+        """Start bounded automatic repair only after the 30-second count changes."""
+        baseline = len(self._usb_topology_snapshot)
+        if baseline == 0:
+            if windows_count > 0:
+                self._capture_usb_topology()
+            return
+
+        if windows_count >= baseline and self.usbmux_device_count >= baseline:
+            self._auto_usb_repair_attempts = 0
+            if windows_count > baseline:
+                self._capture_usb_topology(force=True)
+            return
+
+        if windows_count == 0 and self.usbmux_device_count == 0:
+            self.summary.set("检测到全部USB手机离线，已停止自动闪断以保护全部端口")
+            return
+        if self._usb_repair_in_progress:
+            return
+        if self._auto_usb_repair_attempts >= AUTO_USB_REPAIR_MAX_ATTEMPTS:
+            self.summary.set("USB自动修复已尝试2次，请检查充电桩、数据线或供电")
+            return
+        now = time.monotonic()
+        if now - self._auto_usb_repair_last_attempt < AUTO_USB_REPAIR_COOLDOWN_SECONDS:
+            return
+        if self.repair_usb_devices(automatic=True):
+            self._auto_usb_repair_attempts += 1
+            self._auto_usb_repair_last_attempt = now
 
     def refresh_windows_device_count(self, *, schedule_next: bool = True) -> None:
         """Refresh Windows PnP count without blocking rendering or overlapping runs."""
@@ -2543,6 +3174,8 @@ class XinglanApp:
         if error is None and count is not None:
             self.windows_device_count = count
             self._update_device_counts_text()
+            if AUTO_USB_REPAIR_PROFILE:
+                self._consider_auto_usb_repair(count)
         else:
             LOGGER.warning("Windows USB count failed: %s", error or "unknown error")
         if schedule_next:
@@ -2552,6 +3185,12 @@ class XinglanApp:
             )
 
     def _rebuild_tiles(self) -> None:
+        if FLICKER_FREE_WALL_PROFILE:
+            self._rebuild_tiles_without_flash()
+            return
+        self._rebuild_tiles_legacy()
+
+    def _rebuild_tiles_legacy(self) -> None:
         ordered = self._current_group_udids()
         for tile in self.tiles.values():
             tile.destroy()
@@ -2595,6 +3234,109 @@ class XinglanApp:
         for udid, tile in self.tiles.items():
             tile.set_master(udid == self.master_udid)
         self._refresh_group_button()
+
+    def _rebuild_tiles_without_flash(self) -> None:
+        """Prepare changed slots below the visible widgets, then swap in one Tk turn."""
+        ordered = self._current_group_udids()
+        tile_width, tile_height = TILE_VIEW_SIZE
+        group_number = self._current_group_index() + 1
+        connected_by_slot = dict(
+            self.group_store.positioned_devices(self.sessions, group_number)
+        )
+        old_items = dict(getattr(self, "wall_items", {}))
+        new_items: dict[int, DeviceTile | EmptySlot] = {}
+        new_tiles: dict[str, DeviceTile] = {}
+        new_empty_slots: list[EmptySlot] = []
+        replacements: list[
+            tuple[DeviceTile | EmptySlot, DeviceTile | EmptySlot | None]
+        ] = []
+
+        for index in range(GROUP_SIZE):
+            slot_number = index + 1
+            udid = connected_by_slot.get(slot_number)
+            assigned_udid = self.group_store.udid_at(group_number, slot_number)
+            assigned_label = (
+                self.group_store.label(assigned_udid) if assigned_udid else ""
+            )
+            old_item = old_items.get(index)
+
+            if (
+                udid is not None
+                and isinstance(old_item, DeviceTile)
+                and old_item.session.udid == udid
+                and old_item.session is self.sessions.get(udid)
+            ):
+                item: DeviceTile | EmptySlot = old_item
+            elif (
+                udid is None
+                and isinstance(old_item, EmptySlot)
+                and old_item.assigned_label == assigned_label
+            ):
+                item = old_item
+            elif udid is not None:
+                item = DeviceTile(
+                    self,
+                    self.wall,
+                    self.sessions[udid],
+                    index,
+                    tile_width,
+                    tile_height,
+                )
+                item.grid(index // WALL_COLUMNS, index % WALL_COLUMNS)
+                if old_item is not None:
+                    item.frame.lower(old_item.frame)
+                replacements.append((item, old_item))
+            else:
+                item = EmptySlot(self.wall, index, assigned_label)
+                item.grid(index // WALL_COLUMNS, index % WALL_COLUMNS)
+                if old_item is not None:
+                    item.frame.lower(old_item.frame)
+                replacements.append((item, old_item))
+
+            new_items[index] = item
+            if isinstance(item, DeviceTile):
+                new_tiles[item.session.udid] = item
+            else:
+                new_empty_slots.append(item)
+
+        if replacements:
+            # Geometry and first image are prepared while every replacement is
+            # still underneath its old slot.  No empty background is exposed.
+            self.root.update_idletasks()
+            for item, _old_item in replacements:
+                if isinstance(item, DeviceTile):
+                    item.refresh()
+            for item, old_item in replacements:
+                if old_item is not None:
+                    item.frame.lift(old_item.frame)
+
+        self.tiles = new_tiles
+        self.empty_slots = new_empty_slots
+        self.wall_items = new_items
+
+        active_in_group = [udid for udid in ordered if udid in self.active_udids]
+        if self.master_udid not in active_in_group:
+            self.master_udid = active_in_group[0] if active_in_group else None
+        master_session = self.sessions.get(self.master_udid) if self.master_udid else None
+        self.master_view.set_session(master_session)
+        for udid, tile in self.tiles.items():
+            tile.set_master(udid == self.master_udid)
+        self._refresh_group_button()
+
+        retired = [
+            item
+            for index, item in old_items.items()
+            if new_items.get(index) is not item
+        ]
+        if retired:
+            def destroy_retired(items: list[DeviceTile | EmptySlot] = retired) -> None:
+                for item in items:
+                    try:
+                        item.destroy()
+                    except tk.TclError:
+                        pass
+
+            self.root.after_idle(destroy_retired)
 
     def select_master(self, session: DeviceSession) -> None:
         if session.udid not in self.active_udids:
@@ -2770,10 +3512,51 @@ class XinglanApp:
             self.summary.set("电脑剪贴板里没有可粘贴的文字")
             return
         targets = self._keyboard_targets(source, from_master=from_master)
+        stripped = text.strip()
+        is_short_numeric_code = (
+            OTP_PASTE_PROFILE
+            and stripped.isascii()
+            and stripped.isdigit()
+            and 4 <= len(stripped) <= 8
+        )
+        if is_short_numeric_code:
+            if TROLLVNC_OTP_PASTE_PROFILE:
+                accepted = sum(
+                    1
+                    for session in targets
+                    if session.send_trollvnc_paste(stripped)
+                )
+                self.summary.set(
+                    f"已向 {accepted}/{len(targets)} 台用TrollVNC原生粘贴验证码"
+                )
+            else:
+                accepted = sum(
+                    1 for session in targets if session.send_text_sequence(stripped)
+                )
+                self.summary.set(
+                    f"已向 {accepted}/{len(targets)} 台逐位粘贴验证码"
+                )
+            return
         accepted = sum(1 for session in targets if session.send_text(text))
         self.summary.set(f"已向 {accepted}/{len(targets)} 台直接粘贴文字")
 
     def refresh_tiles(self) -> None:
+        if SMOOTH_RENDER_PROFILE:
+            # The old loop resized all ten phones in one Tk callback.  On an
+            # older dual-socket CPU that blocks mouse delivery for tens of
+            # milliseconds.  Refresh the master first, then spread two tiles
+            # at a time across short callbacks.  Every tile is still sampled
+            # every 50 ms, faster than the phone's 12 fps source cadence.
+            self.master_view.refresh()
+            tiles = list(self.tiles.values())
+            if tiles:
+                start = self._render_tile_cursor % len(tiles)
+                count = min(RENDER_TILES_PER_SLICE, len(tiles))
+                for offset in range(count):
+                    tiles[(start + offset) % len(tiles)].refresh()
+                self._render_tile_cursor = (start + count) % len(tiles)
+            self.root.after(RENDER_SLICE_INTERVAL_MS, self.refresh_tiles)
+            return
         for tile in list(self.tiles.values()):
             tile.refresh()
         self.master_view.refresh()

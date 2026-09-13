@@ -54,6 +54,174 @@ static void XLSendFileResult(int client, BOOL success, NSString *message, NSStri
     XLFileWriteAll(client, line.bytes, line.length);
 }
 
+static void XLSendJsonLine(int client, NSDictionary *payload) {
+    NSData *json = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!json.length) return;
+    NSMutableData *line = [json mutableCopy];
+    [line appendBytes:"\n" length:1];
+    XLFileWriteAll(client, line.bytes, line.length);
+}
+
+static NSString *XLResolveHomePath(NSString *rawPath) {
+    NSString *path = rawPath;
+    if (!path.length) return @"/var/mobile/Documents";
+    if ([path isEqualToString:@"我的iPhone"] || [path isEqualToString:@"文件/我的iPhone"]) {
+        return @"/var/mobile/Documents";
+    }
+    if ([path hasPrefix:@"~"]) {
+        path = [@"/var/mobile" stringByAppendingPathComponent:[path substringFromIndex:1]];
+    }
+    if (![path isAbsolutePath]) {
+        path = [@"/var/mobile/Documents" stringByAppendingPathComponent:path];
+    }
+    return path;
+}
+
+static void XLHandleListDirectory(int client, NSDictionary *metadata) {
+    NSString *rawPath = metadata[@"path"];
+    NSString *path = XLResolveHomePath(rawPath);
+    NSFileManager *manager = NSFileManager.defaultManager;
+    BOOL isDirectory = NO;
+    if (![manager fileExistsAtPath:path isDirectory:&isDirectory] || !isDirectory) {
+        XLSendJsonLine(client, @{
+            @"success" : @(NO),
+            @"message" : @"路径不存在或不是文件夹",
+            @"path" : path,
+            @"entries" : @[],
+        });
+        return;
+    }
+    NSError *error = nil;
+    NSArray<NSString *> *names = [manager contentsOfDirectoryAtPath:path error:&error];
+    if (!names) {
+        XLSendJsonLine(client, @{
+            @"success" : @(NO),
+            @"message" : error.localizedDescription ?: @"无法读取目录",
+            @"path" : path,
+            @"entries" : @[],
+        });
+        return;
+    }
+    NSMutableArray *entries = [NSMutableArray arrayWithCapacity:names.count];
+    for (NSString *name in [names sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+        NSString *fullPath = [path stringByAppendingPathComponent:name];
+        BOOL entryIsDir = NO;
+        if (![manager fileExistsAtPath:fullPath isDirectory:&entryIsDir]) continue;
+        unsigned long long size = 0;
+        if (!entryIsDir) {
+            NSDictionary *attrs = [manager attributesOfItemAtPath:fullPath error:nil];
+            size = [attrs fileSize];
+        }
+        [entries addObject:@{
+            @"name" : name,
+            @"directory" : @(entryIsDir),
+            @"size" : @(size),
+        }];
+    }
+    XLSendJsonLine(client, @{
+        @"success" : @(YES),
+        @"message" : @"",
+        @"path" : path,
+        @"entries" : entries,
+    });
+}
+
+static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
+    NSString *rawPath = metadata[@"path"];
+    NSString *path = XLResolveHomePath(rawPath);
+    NSFileManager *manager = NSFileManager.defaultManager;
+    BOOL isDirectory = NO;
+    if (![manager fileExistsAtPath:path isDirectory:&isDirectory] || !isDirectory) {
+        XLSendJsonLine(client, @{
+            @"success" : @(NO),
+            @"message" : @"路径不存在或不是文件夹",
+        });
+        return;
+    }
+    NSMutableArray *manifestEntries = [NSMutableArray array];
+    NSMutableArray *filePaths = [NSMutableArray array];
+    unsigned long long totalSize = 0;
+    NSDirectoryEnumerator *enumerator = [manager enumeratorAtPath:path];
+    NSString *relative;
+    while ((relative = [enumerator nextObject])) {
+        NSString *fullPath = [path stringByAppendingPathComponent:relative];
+        BOOL entryIsDir = NO;
+        if (![manager fileExistsAtPath:fullPath isDirectory:&entryIsDir]) continue;
+        if (entryIsDir) {
+            [manifestEntries addObject:@{
+                @"path" : relative,
+                @"directory" : @(YES),
+                @"size" : @(0),
+            }];
+        } else {
+            NSDictionary *attrs = [manager attributesOfItemAtPath:fullPath error:nil];
+            unsigned long long size = [attrs fileSize];
+            totalSize += size;
+            [manifestEntries addObject:@{
+                @"path" : relative,
+                @"directory" : @(NO),
+                @"size" : @(size),
+            }];
+            [filePaths addObject:fullPath];
+        }
+        if (manifestEntries.count > XLMaximumFolderEntries) {
+            XLSendJsonLine(client, @{
+                @"success" : @(NO),
+                @"message" : @"文件夹内容超过 100000 项",
+            });
+            return;
+        }
+    }
+    NSDictionary *manifest = @{
+        @"name" : path.lastPathComponent ?: @"downloaded_folder",
+        @"entries" : manifestEntries,
+        @"total_size" : @(totalSize),
+    };
+    NSData *manifestData = [NSJSONSerialization dataWithJSONObject:manifest options:0 error:nil];
+    if (!manifestData.length || manifestData.length > XLMaximumFolderMetadataSize) {
+        XLSendJsonLine(client, @{
+            @"success" : @(NO),
+            @"message" : @"目录清单过大",
+        });
+        return;
+    }
+    uint32_t manifestLenBE = htonl((uint32_t)manifestData.length);
+    if (!XLFileWriteAll(client, &manifestLenBE, sizeof(manifestLenBE))) return;
+    if (!XLFileWriteAll(client, manifestData.bytes, manifestData.length)) return;
+    for (NSString *filePath in filePaths) {
+        NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:filePath];
+        if (!handle) {
+            XLSendJsonLine(client, @{
+                @"success" : @(NO),
+                @"message" : [NSString stringWithFormat:@"无法读取文件：%@", filePath.lastPathComponent],
+            });
+            return;
+        }
+        @try {
+            while (true) {
+                NSData *chunk = [handle readDataOfLength:262144];
+                if (!chunk.length) break;
+                if (!XLFileWriteAll(client, chunk.bytes, chunk.length)) {
+                    [handle closeFile];
+                    return;
+                }
+            }
+            [handle closeFile];
+        } @catch (NSException *exception) {
+            @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
+            XLSendJsonLine(client, @{
+                @"success" : @(NO),
+                @"message" : [NSString stringWithFormat:@"读取文件失败：%@", filePath.lastPathComponent],
+            });
+            return;
+        }
+    }
+    XLSendJsonLine(client, @{
+        @"success" : @(YES),
+        @"message" : [NSString stringWithFormat:@"下载完成：%lu 个文件", (unsigned long)filePaths.count],
+    });
+}
+
 static NSString *XLSafeFileName(NSString *rawName) {
     NSString *name = rawName.lastPathComponent;
     if (!name.length || [name isEqualToString:@"."] || [name isEqualToString:@".."]) {
@@ -331,6 +499,34 @@ static void XLHandleFileClient(int client) {
                 XLSendFileResult(client, NO, @"文件协议错误", nil);
                 break;
             }
+            BOOL isListDir = memcmp(header, "XLLS", 4) == 0;
+            BOOL isDownload = memcmp(header, "XLDW", 4) == 0;
+            if (isListDir || isDownload) {
+                uint32_t metadataLengthBE = 0;
+                memcpy(&metadataLengthBE, header + 4, sizeof(metadataLengthBE));
+                uint32_t metadataLength = ntohl(metadataLengthBE);
+                if (metadataLength == 0 || metadataLength > 64U * 1024U) {
+                    XLSendJsonLine(client, @{@"success" : @(NO), @"message" : @"请求元数据无效"});
+                    break;
+                }
+                NSMutableData *metadataData = [NSMutableData dataWithLength:metadataLength];
+                if (!XLFileReadAll(client, metadataData.mutableBytes, metadataLength)) {
+                    XLSendJsonLine(client, @{@"success" : @(NO), @"message" : @"请求元数据接收失败"});
+                    break;
+                }
+                NSDictionary *metadata = [NSJSONSerialization JSONObjectWithData:metadataData options:0 error:nil];
+                if (![metadata isKindOfClass:NSDictionary.class]) {
+                    XLSendJsonLine(client, @{@"success" : @(NO), @"message" : @"请求元数据无法识别"});
+                    break;
+                }
+                if (isListDir) {
+                    XLHandleListDirectory(client, metadata);
+                } else {
+                    XLHandleDownloadFolder(client, metadata);
+                }
+                break;
+            }
+
             BOOL isSingleFile = memcmp(header, "XLFT", 4) == 0;
             BOOL isFolder = memcmp(header, "XLFD", 4) == 0;
             if (!isSingleFile && !isFolder) {
