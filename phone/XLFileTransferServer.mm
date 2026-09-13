@@ -171,38 +171,40 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
     NSDirectoryEnumerator *enumerator = [manager enumeratorAtPath:path];
     NSString *relative;
     while ((relative = [enumerator nextObject])) {
-        NSString *fullPath = [path stringByAppendingPathComponent:relative];
-        BOOL entryIsDir = NO;
-        if (![manager fileExistsAtPath:fullPath isDirectory:&entryIsDir]) continue;
-        if (entryIsDir) {
-            [manifestEntries addObject:@{
-                @"path" : relative,
-                @"directory" : @(YES),
-                @"size" : @(0),
-            }];
-        } else {
-            // 检查文件是否可以读取，不能读取的跳过，不加入清单
-            NSFileHandle *testHandle = [NSFileHandle fileHandleForReadingAtPath:fullPath];
-            if (!testHandle) {
-                continue;
+        @autoreleasepool {
+            NSString *fullPath = [path stringByAppendingPathComponent:relative];
+            BOOL entryIsDir = NO;
+            if (![manager fileExistsAtPath:fullPath isDirectory:&entryIsDir]) continue;
+            if (entryIsDir) {
+                [manifestEntries addObject:@{
+                    @"path" : relative,
+                    @"directory" : @(YES),
+                    @"size" : @(0),
+                }];
+            } else {
+                // 检查文件是否可以读取，不能读取的跳过，不加入清单
+                NSFileHandle *testHandle = [NSFileHandle fileHandleForReadingAtPath:fullPath];
+                if (!testHandle) {
+                    continue;
+                }
+                [testHandle closeFile];
+                NSDictionary *attrs = [manager attributesOfItemAtPath:fullPath error:nil];
+                unsigned long long size = [attrs fileSize];
+                totalSize += size;
+                [manifestEntries addObject:@{
+                    @"path" : relative,
+                    @"directory" : @(NO),
+                    @"size" : @(size),
+                }];
+                [filePaths addObject:fullPath];
             }
-            [testHandle closeFile];
-            NSDictionary *attrs = [manager attributesOfItemAtPath:fullPath error:nil];
-            unsigned long long size = [attrs fileSize];
-            totalSize += size;
-            [manifestEntries addObject:@{
-                @"path" : relative,
-                @"directory" : @(NO),
-                @"size" : @(size),
-            }];
-            [filePaths addObject:fullPath];
-        }
-        if (manifestEntries.count > XLMaximumFolderEntries) {
-            XLSendJsonLine(client, @{
-                @"success" : @(NO),
-                @"message" : @"文件夹内容超过 100000 项",
-            });
-            return;
+            if (manifestEntries.count > XLMaximumFolderEntries) {
+                XLSendJsonLine(client, @{
+                    @"success" : @(NO),
+                    @"message" : @"文件夹内容超过 100000 项",
+                });
+                return;
+            }
         }
     }
     NSDictionary *manifest = @{
@@ -230,11 +232,13 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
         }
         @try {
             while (true) {
-                NSData *chunk = [handle readDataOfLength:262144];
-                if (!chunk.length) break;
-                if (!XLFileWriteAll(client, chunk.bytes, chunk.length)) {
-                    [handle closeFile];
-                    return;
+                @autoreleasepool {
+                    NSData *chunk = [handle readDataOfLength:262144];
+                    if (!chunk.length) break;
+                    if (!XLFileWriteAll(client, chunk.bytes, chunk.length)) {
+                        [handle closeFile];
+                        return;
+                    }
                 }
             }
             [handle closeFile];
