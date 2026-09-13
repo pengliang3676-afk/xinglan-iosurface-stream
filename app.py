@@ -2604,19 +2604,19 @@ class XinglanApp:
 
             def callback(result) -> None:
                 if isinstance(result, Exception):
-                    if retry_count[0] < 1:
+                    if retry_count[0] < 3:
                         retry_count[0] += 1
-                        progress_text.set("连接失败，1.5秒后自动重试…")
-                        window.after(1500, lambda: self._run_async_action(lambda: list_directory(udid, path), callback))
+                        progress_text.set(f"连接失败，2秒后自动重试（第{retry_count[0]}/3次）…")
+                        window.after(2000, lambda: self._run_async_action(lambda: list_directory(udid, path), callback))
                         return
                     progress_text.set(f"读取失败：{result}")
                     return
                 if not result.success:
                     msg = str(result.message)
-                    if retry_count[0] < 1 and ("协议" in msg or "连接" in msg or "超时" in msg or "未连接" in msg):
+                    if retry_count[0] < 3 and ("协议" in msg or "连接" in msg or "超时" in msg or "未连接" in msg):
                         retry_count[0] += 1
-                        progress_text.set("读取失败，1.5秒后自动重试…")
-                        window.after(1500, lambda: self._run_async_action(lambda: list_directory(udid, path), callback))
+                        progress_text.set(f"读取失败，2秒后自动重试（第{retry_count[0]}/3次）…")
+                        window.after(2000, lambda: self._run_async_action(lambda: list_directory(udid, path), callback))
                         return
                     progress_text.set(f"读取失败：{result.message}")
                     return

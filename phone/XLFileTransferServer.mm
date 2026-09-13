@@ -549,6 +549,10 @@ static void XLHandleFileClient(int client) {
                     XLHandleListDirectory(client, metadata);
                 } else {
                     XLHandleDownloadFolder(client, metadata);
+                    // 下载完成后重启服务进程，彻底清理所有 socket/句柄/内存状态
+                    shutdown(client, SHUT_RDWR);
+                    close(client);
+                    exit(0);
                 }
                 break;
             }
