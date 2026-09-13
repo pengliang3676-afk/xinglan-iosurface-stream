@@ -64,12 +64,28 @@ static void XLSendJsonLine(int client, NSDictionary *payload) {
 
 static NSString *XLTransferDocumentsDirectory(void);
 
+static NSString *XLDefaultBrowseDirectory(void) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSString *transferDir = XLTransferDocumentsDirectory();
+    NSString *parent = transferDir.stringByDeletingLastPathComponent;
+    if (!parent.length) parent = @"/var/mobile";
+    BOOL isDir = NO;
+    if (![manager fileExistsAtPath:parent isDirectory:&isDir] || !isDir) {
+        [manager createDirectoryAtPath:parent withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    // 确保星澜传输目录也存在
+    if (![manager fileExistsAtPath:transferDir isDirectory:&isDir] || !isDir) {
+        [manager createDirectoryAtPath:transferDir withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    return parent;
+}
+
 static NSString *XLResolveHomePath(NSString *rawPath) {
     NSString *path = rawPath;
-    if (!path.length) return XLTransferDocumentsDirectory();
+    if (!path.length) return XLDefaultBrowseDirectory();
     if ([path isEqualToString:@"我的iPhone"] || [path isEqualToString:@"文件/我的iPhone"] ||
         [path isEqualToString:@"/var/mobile/Documents"]) {
-        return XLTransferDocumentsDirectory();
+        return XLDefaultBrowseDirectory();
     }
     if ([path hasPrefix:@"~"]) {
         path = [@"/var/mobile" stringByAppendingPathComponent:[path substringFromIndex:1]];
