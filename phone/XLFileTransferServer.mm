@@ -153,7 +153,7 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
     if (![manager fileExistsAtPath:path isDirectory:&isDirectory] || !isDirectory) {
         XLSendJsonLine(client, @{
             @"success" : @(NO),
-            @"message" : @"路径不存在或不是文件夹",
+            @"message" : [NSString stringWithFormat:@"路径不存在 raw=%@ resolved=%@", rawPath, path],
         });
         return;
     }
