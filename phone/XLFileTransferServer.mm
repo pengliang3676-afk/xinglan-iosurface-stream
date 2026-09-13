@@ -167,6 +167,7 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
     NSMutableArray *manifestEntries = [NSMutableArray array];
     NSMutableArray *filePaths = [NSMutableArray array];
     unsigned long long totalSize = 0;
+    NSUInteger skippedCount = 0;
     NSDirectoryEnumerator *enumerator = [manager enumeratorAtPath:path];
     NSString *relative;
     while ((relative = [enumerator nextObject])) {
@@ -180,6 +181,12 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
                 @"size" : @(0),
             }];
         } else {
+            // 检查文件是否可以读取，不能读取的跳过，不加入清单
+            NSFileHandle *testHandle = [NSFileHandle fileHandleForReadingAtPath:fullPath];
+            if (!testHandle) {
+                continue;
+            }
+            [testHandle closeFile];
             NSDictionary *attrs = [manager attributesOfItemAtPath:fullPath error:nil];
             unsigned long long size = [attrs fileSize];
             totalSize += size;
@@ -217,11 +224,9 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
     for (NSString *filePath in filePaths) {
         NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:filePath];
         if (!handle) {
-            XLSendJsonLine(client, @{
-                @"success" : @(NO),
-                @"message" : [NSString stringWithFormat:@"无法读取文件：%@", filePath.lastPathComponent],
-            });
-            return;
+            // 跳过无法读取的文件，不中断整个下载
+            skippedCount++;
+            continue;
         }
         @try {
             while (true) {
@@ -235,16 +240,15 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
             [handle closeFile];
         } @catch (NSException *exception) {
             @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
-            XLSendJsonLine(client, @{
-                @"success" : @(NO),
-                @"message" : [NSString stringWithFormat:@"读取文件失败：%@", filePath.lastPathComponent],
-            });
-            return;
+            // 跳过读取异常的文件，不中断整个下载
+            skippedCount++;
+            continue;
         }
     }
     XLSendJsonLine(client, @{
         @"success" : @(YES),
-        @"message" : [NSString stringWithFormat:@"下载完成：%lu 个文件", (unsigned long)filePaths.count],
+        @"message" : [NSString stringWithFormat:@"下载完成：%lu 个文件%@", (unsigned long)(filePaths.count - skippedCount),
+                       skippedCount > 0 ? [NSString stringWithFormat:@"（跳过 %lu 个无法读取的文件）", (unsigned long)skippedCount] : @""],
     });
 }
 
@@ -549,10 +553,6 @@ static void XLHandleFileClient(int client) {
                     XLHandleListDirectory(client, metadata);
                 } else {
                     XLHandleDownloadFolder(client, metadata);
-                    // 下载完成后重启服务进程，彻底清理所有 socket/句柄/内存状态
-                    shutdown(client, SHUT_RDWR);
-                    close(client);
-                    exit(0);
                 }
                 break;
             }
