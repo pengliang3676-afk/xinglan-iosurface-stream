@@ -2567,6 +2567,7 @@ class XinglanApp:
         save_dir = tk.StringVar(value=str(Path.home() / "Desktop"))
         progress_text = tk.StringVar(value="请选择手机后点击刷新，浏览文件列表")
         downloading = tk.BooleanVar(value=False)
+        default_actual_path = tk.StringVar(value="")  # 手机端返回的默认路径实际位置
         list_entries: list[dict] = []
 
         # 获取当前组已连接投屏的手机
@@ -2606,6 +2607,11 @@ class XinglanApp:
                 if not result.success:
                     progress_text.set(f"读取失败：{result.message}")
                     return
+                # 用手机端返回的实际路径更新 current_path（解决 /var/mobile/Documents 到真实路径的映射）
+                if result.path:
+                    current_path.set(result.path)
+                    if path == DEFAULT_PATH:
+                        default_actual_path.set(result.path)
                 for entry in result.entries:
                     icon = "📁" if entry.directory else "📄"
                     size_text = "—" if entry.directory else _format_size(entry.size)
@@ -2654,11 +2660,11 @@ class XinglanApp:
 
         def go_parent() -> None:
             path = current_path.get()
-            if path == DEFAULT_PATH or path == "/var/mobile" or path == "/":
+            if path == DEFAULT_PATH or path == default_actual_path.get() or path == "/var/mobile" or path == "/":
                 return
             parent = str(Path(path).parent)
             current_path.set(parent)
-            if parent == DEFAULT_PATH:
+            if parent == DEFAULT_PATH or parent == default_actual_path.get():
                 display_path.set("文件 > 我的iPhone")
             else:
                 display_path.set(f"文件 > 我的iPhone > {Path(parent).name}")
