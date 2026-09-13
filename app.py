@@ -2700,7 +2700,7 @@ class XinglanApp:
             download_btn.configure(state="disabled", text="正在下载…")
             refresh_btn.configure(state="disabled")
             parent_btn.configure(state="disabled")
-            progress_text.set(f"正在下载 {Path(folder).name} 到桌面…")
+            progress_text.set(f"正在下载 {folder} 到桌面…")
             self.summary.set(f"正在从手机下载 {Path(folder).name} …")
 
             def callback(result) -> None:

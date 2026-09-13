@@ -87,8 +87,9 @@ async def list_directory(udid: str, path: str) -> ListResult:
         await asyncio.wait_for(connection.sendall(metadata), timeout=30.0)
 
         payload = await _recv_json_line(connection, max_bytes=MAX_MANIFEST_SIZE)
+        resolved_path = str(payload.get("path", path) or path)
         if not payload.get("success"):
-            return ListResult(False, str(payload.get("message", "列目录失败")), path)
+            return ListResult(False, str(payload.get("message", "列目录失败")), resolved_path)
 
         raw_entries = payload.get("entries") or []
         entries: list[DirectoryEntry] = []
@@ -102,7 +103,7 @@ async def list_directory(udid: str, path: str) -> ListResult:
                     size=int(item.get("size", 0) or 0),
                 )
             )
-        return ListResult(True, path=path, entries=tuple(entries))
+        return ListResult(True, path=resolved_path, entries=tuple(entries))
     except asyncio.TimeoutError:
         return ListResult(False, "连接超时")
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError, ConnectionError) as exc:
@@ -136,7 +137,14 @@ async def download_folder(udid: str, phone_path: str, save_dir: Path) -> Downloa
         manifest_len_bytes = await _recv_exact(connection, 4)
         manifest_len = struct.unpack(">I", manifest_len_bytes)[0]
         if manifest_len == 0 or manifest_len > MAX_MANIFEST_SIZE:
-            return DownloadResult(False, "手机返回的目录清单大小无效")
+            # 尝试读取剩余数据，看看是不是手机端返回了JSON错误信息
+            try:
+                extra = await asyncio.wait_for(connection.recv_any(4096), timeout=5.0)
+            except Exception:
+                extra = b""
+            combined = manifest_len_bytes + (extra or b"")
+            detail = combined[:200].decode("utf-8", errors="replace")
+            return DownloadResult(False, f"目录清单大小无效(len={manifest_len},hex={manifest_len_bytes.hex()},data={detail})")
 
         # 2. 读清单 JSON
         manifest_data = await _recv_exact(connection, manifest_len)
