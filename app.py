@@ -2600,11 +2600,24 @@ class XinglanApp:
                 file_list.delete(item)
             list_entries.clear()
 
+            retry_count = [0]
+
             def callback(result) -> None:
                 if isinstance(result, Exception):
+                    if retry_count[0] < 1:
+                        retry_count[0] += 1
+                        progress_text.set("连接失败，1.5秒后自动重试…")
+                        window.after(1500, lambda: self._run_async_action(lambda: list_directory(udid, path), callback))
+                        return
                     progress_text.set(f"读取失败：{result}")
                     return
                 if not result.success:
+                    msg = str(result.message)
+                    if retry_count[0] < 1 and ("协议" in msg or "连接" in msg or "超时" in msg or "未连接" in msg):
+                        retry_count[0] += 1
+                        progress_text.set("读取失败，1.5秒后自动重试…")
+                        window.after(1500, lambda: self._run_async_action(lambda: list_directory(udid, path), callback))
+                        return
                     progress_text.set(f"读取失败：{result.message}")
                     return
                 # 用手机端返回的实际路径更新 current_path（解决 /var/mobile/Documents 到真实路径的映射）
