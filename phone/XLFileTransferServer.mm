@@ -151,11 +151,18 @@ static void XLHandleDownloadFolder(int client, NSDictionary *metadata) {
     NSFileManager *manager = NSFileManager.defaultManager;
     BOOL isDirectory = NO;
     if (![manager fileExistsAtPath:path isDirectory:&isDirectory] || !isDirectory) {
-        XLSendJsonLine(client, @{
-            @"success" : @(NO),
-            @"message" : [NSString stringWithFormat:@"路径不存在 raw=%@ resolved=%@", rawPath, path],
-        });
-        return;
+        // 容错：中文路径 NFC/NFD 编码不匹配时，回退到手机端自生成的传输目录
+        NSString *fallback = XLTransferDocumentsDirectory();
+        BOOL fallbackIsDir = NO;
+        if ([manager fileExistsAtPath:fallback isDirectory:&fallbackIsDir] && fallbackIsDir) {
+            path = fallback;
+        } else {
+            XLSendJsonLine(client, @{
+                @"success" : @(NO),
+                @"message" : [NSString stringWithFormat:@"路径不存在 raw=%@ resolved=%@ fallback=%@", rawPath, path, fallback],
+            });
+            return;
+        }
     }
     NSMutableArray *manifestEntries = [NSMutableArray array];
     NSMutableArray *filePaths = [NSMutableArray array];
